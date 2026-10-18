@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -27,6 +28,40 @@ func Table(w io.Writer, r estimate.Report) error {
 	if _, err := fmt.Fprintf(w, "\n%d words, %d chunk(s), model %s. Times are cumulative; ranges are 10th-90th percentile.\n", r.Words, r.Chunks, r.Model); err != nil {
 		return fmt.Errorf("writing summary: %w", err)
 	}
+	if len(r.Links) == 0 {
+		return nil
+	}
+	return linkTable(w, r)
+}
+
+func linkTable(w io.Writer, r estimate.Report) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprint(tw, "\nLINK\tWORDS")
+	for _, res := range r.Results {
+		fmt.Fprintf(tw, "\t%s", strings.ToUpper(res.Audience.ID))
+	}
+	fmt.Fprintln(tw)
+	var skipped []estimate.LinkResult
+	for _, link := range r.Links {
+		if link.Skipped != "" {
+			skipped = append(skipped, link)
+			continue
+		}
+		fmt.Fprintf(tw, "%s\t%d", link.Target, link.Words)
+		for _, res := range r.Results {
+			fmt.Fprintf(tw, "\t%.0f%%", link.NeededBy[res.Audience.ID]*100)
+		}
+		fmt.Fprintln(tw)
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("writing link table: %w", err)
+	}
+	for _, link := range skipped {
+		fmt.Fprintf(w, "skipped %s: %s\n", link.Target, link.Skipped)
+	}
+	if _, err := fmt.Fprintln(w, "\nPercentages are the chance each audience must read the link; understand and grok times include linked content weighted by them."); err != nil {
+		return fmt.Errorf("writing link summary: %w", err)
+	}
 	return nil
 }
 
@@ -46,16 +81,29 @@ type jsonResult struct {
 	GrokLikelihood float64   `json:"grok_likelihood"`
 }
 
+type jsonLink struct {
+	Text     string             `json:"text"`
+	Target   string             `json:"target"`
+	External bool               `json:"external"`
+	Words    int                `json:"words,omitempty"`
+	NeededBy map[string]float64 `json:"needed_by,omitempty"`
+	Skipped  string             `json:"skipped,omitempty"`
+}
+
 type jsonReport struct {
 	Words     int          `json:"words"`
 	Chunks    int          `json:"chunks"`
 	Model     string       `json:"model"`
 	Audiences []jsonResult `json:"audiences"`
+	Links     []jsonLink   `json:"links"`
 }
 
 // JSON writes r to w as indented JSON with durations in seconds.
 func JSON(w io.Writer, r estimate.Report) error {
-	out := jsonReport{Words: r.Words, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results))}
+	out := jsonReport{Words: r.Words, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results)), Links: make([]jsonLink, 0, len(r.Links))}
+	for _, link := range r.Links {
+		out.Links = append(out.Links, jsonLink(link))
+	}
 	for _, res := range r.Results {
 		out.Audiences = append(out.Audiences, jsonResult{
 			ID:             res.Audience.ID,

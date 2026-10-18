@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bobcob7/readtime/internal/jev"
+	"github.com/bobcob7/readtime/internal/links"
 )
 
 func testLogger() *slog.Logger {
@@ -30,42 +31,48 @@ func fixedDecider(probs map[string]float64, noul float64) *deciderMock {
 	}}
 }
 
-func adultResult(t *testing.T, r Report) Result {
+func noFetcher() *linkFetcherMock {
+	return &linkFetcherMock{FetchFunc: func(context.Context, links.Link) (string, error) {
+		return "", errors.New("unexpected fetch")
+	}}
+}
+
+func crossfnResult(t *testing.T, r Report) Result {
 	t.Helper()
 	for _, res := range r.Results {
-		if res.Audience.ID == "adult" {
+		if res.Audience.ID == "crossfn" {
 			return res
 		}
 	}
-	require.FailNow(t, "adult audience missing")
+	require.FailNow(t, "crossfn audience missing")
 	return Result{}
 }
 
 func TestEstimateWithEffortlessTextScalesReadTimeByLowestMultipliers(t *testing.T) {
 	t.Parallel()
-	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.9), "jev-latest", testLogger())
+	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.9), noFetcher(), "jev-latest", 10, testLogger())
 	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 476))
 	require.NoError(t, err)
-	adult := adultResult(t, rep)
-	assert.Equal(t, 2*time.Minute, adult.Read)
-	assert.Equal(t, 2*time.Minute, adult.Understand.Expected)
-	assert.InDelta(t, (144 * time.Second).Seconds(), adult.Grok.Expected.Seconds(), 0.001)
+	res := crossfnResult(t, rep)
+	assert.Equal(t, 2*time.Minute, res.Read)
+	assert.Equal(t, 2*time.Minute, res.Understand.Expected)
+	assert.InDelta(t, (144 * time.Second).Seconds(), res.Grok.Expected.Seconds(), 0.001)
 }
 
 func TestEstimateWithSpreadDistributionProducesWiderBand(t *testing.T) {
 	t.Parallel()
-	est := NewEstimator(fixedDecider(map[string]float64{"0": 0.05, "1": 0.15, "2": 0.6, "3": 0.15, "4": 0.05}, 0.5), "jev-latest", testLogger())
+	est := NewEstimator(fixedDecider(map[string]float64{"0": 0.05, "1": 0.15, "2": 0.6, "3": 0.15, "4": 0.05}, 0.5), noFetcher(), "jev-latest", 10, testLogger())
 	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 476))
 	require.NoError(t, err)
-	adult := adultResult(t, rep)
-	assert.Equal(t, time.Duration(2.8*float64(time.Minute)), adult.Understand.Low)
-	assert.Equal(t, 6*time.Minute, adult.Understand.High)
+	res := crossfnResult(t, rep)
+	assert.Equal(t, time.Duration(2.8*float64(time.Minute)), res.Understand.Low)
+	assert.Equal(t, 6*time.Minute, res.Understand.High)
 }
 
 func TestEstimateCallsDeciderOncePerChunk(t *testing.T) {
 	t.Parallel()
 	mock := fixedDecider(map[string]float64{"0": 1}, 1)
-	est := NewEstimator(mock, "jev-latest", testLogger())
+	est := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger())
 	est.chunkWords = 10
 	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 25))
 	require.NoError(t, err)
@@ -75,7 +82,7 @@ func TestEstimateCallsDeciderOncePerChunk(t *testing.T) {
 
 func TestEstimateRejectsEmptyInput(t *testing.T) {
 	t.Parallel()
-	est := NewEstimator(fixedDecider(nil, 0), "jev-latest", testLogger())
+	est := NewEstimator(fixedDecider(nil, 0), noFetcher(), "jev-latest", 10, testLogger())
 	_, err := est.Estimate(t.Context(), " \n\n\t ")
 	assert.ErrorIs(t, err, errEmptyInput)
 }
@@ -86,7 +93,7 @@ func TestEstimatePropagatesDeciderErrors(t *testing.T) {
 	mock := &deciderMock{SystemOneFunc: func(context.Context, jev.Request) (jev.Response, error) {
 		return jev.Response{}, boom
 	}}
-	_, err := NewEstimator(mock, "jev-latest", testLogger()).Estimate(t.Context(), "some text")
+	_, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "some text")
 	assert.ErrorIs(t, err, boom)
 }
 
@@ -95,8 +102,61 @@ func TestEstimateFailsWhenAnswerMissing(t *testing.T) {
 	mock := &deciderMock{SystemOneFunc: func(context.Context, jev.Request) (jev.Response, error) {
 		return jev.Response{Answers: map[string]jev.Answer{}}, nil
 	}}
-	_, err := NewEstimator(mock, "jev-latest", testLogger()).Estimate(t.Context(), "some text")
+	_, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "some text")
 	assert.ErrorIs(t, err, errMissingAnswer)
+}
+
+func guideFetcher() *linkFetcherMock {
+	return &linkFetcherMock{FetchFunc: func(_ context.Context, link links.Link) (string, error) {
+		if link.External {
+			return "", errors.New("external links disabled")
+		}
+		return strings.Repeat("word ", 238), nil
+	}}
+}
+
+const linkedText = "See [the guide](guide.md) and [the spec](https://example.com/spec) first."
+
+func TestEstimateAddsLinkedContentWeightedByNeed(t *testing.T) {
+	t.Parallel()
+	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 10, testLogger())
+	rep, err := est.Estimate(t.Context(), linkedText)
+	require.NoError(t, err)
+	res := crossfnResult(t, rep)
+	assert.Equal(t, res.Read+30*time.Second, res.Understand.Expected)
+}
+
+func TestEstimateReportsNeedAndSkippedLinks(t *testing.T) {
+	t.Parallel()
+	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 10, testLogger())
+	rep, err := est.Estimate(t.Context(), linkedText)
+	require.NoError(t, err)
+	require.Len(t, rep.Links, 2)
+	assert.Equal(t, LinkResult{Text: "the guide", Target: "guide.md", Words: 238, NeededBy: map[string]float64{"esl": 0.5, "crossfn": 0.5, "junior": 0.5, "senior": 0.5, "expert": 0.5}}, rep.Links[0])
+	assert.Equal(t, LinkResult{Text: "the spec", Target: "https://example.com/spec", External: true, Skipped: "external links disabled"}, rep.Links[1])
+}
+
+func TestEstimateAsksLinkQuestionsOnlyInChunkContainingLink(t *testing.T) {
+	t.Parallel()
+	mock := fixedDecider(map[string]float64{"0": 1}, 0.5)
+	est := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger())
+	est.chunkWords = 5
+	_, err := est.Estimate(t.Context(), "one two three four five\n\n"+linkedText)
+	require.NoError(t, err)
+	for _, call := range mock.SystemOneCalls() {
+		_, asked := call.Req.Questions[linkQuestionID(0, Audiences()[0])]
+		assert.Equal(t, strings.Contains(call.Req.State.(string), "[the guide]"), asked)
+	}
+}
+
+func TestEstimateWithZeroMaxLinksSkipsFetching(t *testing.T) {
+	t.Parallel()
+	fetcher := guideFetcher()
+	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), fetcher, "jev-latest", 0, testLogger())
+	rep, err := est.Estimate(t.Context(), linkedText)
+	require.NoError(t, err)
+	assert.Empty(t, fetcher.FetchCalls())
+	assert.Empty(t, rep.Links)
 }
 
 func TestQuantile(t *testing.T) {

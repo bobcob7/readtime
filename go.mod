@@ -5,6 +5,8 @@ go 1.27.1
 require (
 	github.com/matryer/moq v0.8.1
 	github.com/stretchr/testify v1.12.1
+	github.com/yuin/goldmark v1.8.6
+	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0
 	mvdan.cc/gofumpt v0.12.0
 )

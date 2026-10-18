@@ -11,19 +11,25 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"github.com/bobcob7/readtime/internal/estimate"
 	"github.com/bobcob7/readtime/internal/jev"
+	"github.com/bobcob7/readtime/internal/links"
 	"github.com/bobcob7/readtime/internal/report"
 )
 
-const maxInputBytes = 16 << 20
+const (
+	maxInputBytes = 16 << 20
+	linkTimeout   = 15 * time.Second
+)
 
 var (
 	errMissingAPIKey = errors.New("TYPESAFE_API_KEY is not set")
-	errNoInput       = errors.New("no input: pipe text to stdin, e.g. `cat essay.md | readtime`")
+	errNoInput       = errors.New("no input: pass a file or pipe text to stdin, e.g. `readtime essay.md`")
 	errInputTooLarge = errors.New("input exceeds 16 MiB")
+	errTooManyArgs   = errors.New("expected at most one file argument")
 )
 
 func main() {
@@ -39,8 +45,11 @@ func run(args []string) error {
 	model := fs.String("model", jev.DefaultModel, "Jev model to query")
 	timeout := fs.Duration("timeout", 2*time.Minute, "overall time limit")
 	verbose := fs.Bool("v", false, "log API activity to stderr")
+	baseDir := fs.String("base", ".", "directory relative links resolve against when reading stdin")
+	external := fs.Bool("external", false, "also fetch http(s) links")
+	maxLinks := fs.Int("max-links", 10, "maximum links to follow (0 disables)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: <text> | readtime [flags]\n\nEstimates read, understand and grok times per audience using TypeSafe Jev.\nRequires TYPESAFE_API_KEY.\n\nFlags:")
+		fmt.Fprintln(fs.Output(), "Usage: readtime [flags] [file]\n       <text> | readtime [flags]\n\nEstimates read, understand and grok times per professional audience using TypeSafe Jev.\nLinked content is followed one level deep. Requires TYPESAFE_API_KEY.\n\nFlags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -53,7 +62,7 @@ func run(args []string) error {
 	if apiKey == "" {
 		return errMissingAPIKey
 	}
-	text, err := readStdin(os.Stdin)
+	text, base, err := readInput(fs.Args(), *baseDir)
 	if err != nil {
 		return err
 	}
@@ -67,7 +76,8 @@ func run(args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	client := jev.NewClient(&http.Client{}, jev.DefaultBaseURL, apiKey, logger)
-	estimator := estimate.NewEstimator(client, *model, logger)
+	fetcher := links.NewFetcher(&http.Client{Timeout: linkTimeout}, base, *external, logger)
+	estimator := estimate.NewEstimator(client, fetcher, *model, *maxLinks, logger)
 	rep, err := estimator.Estimate(ctx, text)
 	if err != nil {
 		return fmt.Errorf("estimating: %w", err)
@@ -78,6 +88,25 @@ func run(args []string) error {
 	return report.Table(os.Stdout, rep)
 }
 
+// readInput reads the file argument if given, else stdin, and returns the directory relative links resolve against.
+func readInput(args []string, baseDir string) (string, string, error) {
+	switch len(args) {
+	case 0:
+		text, err := readStdin(os.Stdin)
+		return text, baseDir, err
+	case 1:
+		file, err := os.Open(args[0])
+		if err != nil {
+			return "", "", fmt.Errorf("opening input: %w", err)
+		}
+		defer file.Close()
+		text, err := readAll(file)
+		return text, filepath.Dir(args[0]), err
+	default:
+		return "", "", errTooManyArgs
+	}
+}
+
 func readStdin(f *os.File) (string, error) {
 	info, err := f.Stat()
 	if err != nil {
@@ -86,9 +115,13 @@ func readStdin(f *os.File) (string, error) {
 	if info.Mode()&os.ModeCharDevice != 0 {
 		return "", errNoInput
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxInputBytes+1))
+	return readAll(f)
+}
+
+func readAll(r io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxInputBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("reading stdin: %w", err)
+		return "", fmt.Errorf("reading input: %w", err)
 	}
 	if len(data) > maxInputBytes {
 		return "", errInputTooLarge

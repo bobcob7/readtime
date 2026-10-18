@@ -65,3 +65,23 @@ func TestJSONReportsDurationsInSeconds(t *testing.T) {
 	require.Len(t, got.Audiences, 1)
 	assert.Equal(t, jsonRange{ExpectedSeconds: 540, LowSeconds: 300, HighSeconds: 1200}, got.Audiences[0].Grok)
 }
+
+func TestTableListsFollowedAndSkippedLinks(t *testing.T) {
+	t.Parallel()
+	rep := sampleReport()
+	rep.Links = []estimate.LinkResult{
+		{Target: "docs/setup.md", Words: 300, NeededBy: map[string]float64{"adult": 0.75}},
+		{Target: "https://example.com", External: true, Skipped: "external links disabled (pass -external)"},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, Table(&buf, rep))
+	assert.Contains(t, buf.String(), "docs/setup.md  300    75%")
+	assert.Contains(t, buf.String(), "skipped https://example.com: external links disabled (pass -external)")
+}
+
+func TestTableOmitsLinkSectionWithoutLinks(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	require.NoError(t, Table(&buf, sampleReport()))
+	assert.NotContains(t, buf.String(), "LINK")
+}

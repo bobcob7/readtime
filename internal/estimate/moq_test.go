@@ -6,6 +6,7 @@ package estimate
 import (
 	"context"
 	"github.com/bobcob7/readtime/internal/jev"
+	"github.com/bobcob7/readtime/internal/links"
 	"sync"
 )
 
@@ -78,5 +79,77 @@ func (mock *deciderMock) SystemOneCalls() []struct {
 	mock.lockSystemOne.RLock()
 	calls = mock.calls.SystemOne
 	mock.lockSystemOne.RUnlock()
+	return calls
+}
+
+// Ensure, that linkFetcherMock does implement linkFetcher.
+// If this is not the case, regenerate this file with moq.
+var _ linkFetcher = &linkFetcherMock{}
+
+// linkFetcherMock is a mock implementation of linkFetcher.
+//
+//	func TestSomethingThatUseslinkFetcher(t *testing.T) {
+//
+//		// make and configure a mocked linkFetcher
+//		mockedlinkFetcher := &linkFetcherMock{
+//			FetchFunc: func(ctx context.Context, link links.Link) (string, error) {
+//				panic("mock out the Fetch method")
+//			},
+//		}
+//
+//		// use mockedlinkFetcher in code that requires linkFetcher
+//		// and then make assertions.
+//
+//	}
+type linkFetcherMock struct {
+	// FetchFunc mocks the Fetch method.
+	FetchFunc func(ctx context.Context, link links.Link) (string, error)
+
+	// calls tracks calls to the methods.
+	calls struct {
+		// Fetch holds details about calls to the Fetch method.
+		Fetch []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// Link is the link argument value.
+			Link links.Link
+		}
+	}
+	lockFetch sync.RWMutex
+}
+
+// Fetch calls FetchFunc.
+func (mock *linkFetcherMock) Fetch(ctx context.Context, link links.Link) (string, error) {
+	if mock.FetchFunc == nil {
+		panic("linkFetcherMock.FetchFunc: method is nil but linkFetcher.Fetch was just called")
+	}
+	callInfo := struct {
+		Ctx  context.Context
+		Link links.Link
+	}{
+		Ctx:  ctx,
+		Link: link,
+	}
+	mock.lockFetch.Lock()
+	mock.calls.Fetch = append(mock.calls.Fetch, callInfo)
+	mock.lockFetch.Unlock()
+	return mock.FetchFunc(ctx, link)
+}
+
+// FetchCalls gets all the calls that were made to Fetch.
+// Check the length with:
+//
+//	len(mockedlinkFetcher.FetchCalls())
+func (mock *linkFetcherMock) FetchCalls() []struct {
+	Ctx  context.Context
+	Link links.Link
+} {
+	var calls []struct {
+		Ctx  context.Context
+		Link links.Link
+	}
+	mock.lockFetch.RLock()
+	calls = mock.calls.Fetch
+	mock.lockFetch.RUnlock()
 	return calls
 }
