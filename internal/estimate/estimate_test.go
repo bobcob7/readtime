@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -48,25 +49,50 @@ func crossfnResult(t *testing.T, r Report) Result {
 	return Result{}
 }
 
-func TestEstimateWithEffortlessTextScalesReadTimeByLowestMultipliers(t *testing.T) {
+func TestEstimateUsesRepresentativeTimeOfChosenBucket(t *testing.T) {
+	t.Parallel()
+	est := NewEstimator(fixedDecider(map[string]float64{"2": 1}, 0.9), noFetcher(), "jev-latest", 10, testLogger())
+	rep, err := est.Estimate(t.Context(), "A short passage.")
+	require.NoError(t, err)
+	assert.InDelta(t, math.Sqrt(30), crossfnResult(t, rep).Understand.Expected.Minutes(), 1e-6)
+}
+
+func TestEstimateNeverUnderstandsFasterThanReading(t *testing.T) {
 	t.Parallel()
 	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.9), noFetcher(), "jev-latest", 10, testLogger())
 	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 476))
 	require.NoError(t, err)
 	res := crossfnResult(t, rep)
-	assert.Equal(t, 2*time.Minute, res.Read)
 	assert.Equal(t, 2*time.Minute, res.Understand.Expected)
-	assert.InDelta(t, (144 * time.Second).Seconds(), res.Grok.Expected.Seconds(), 0.001)
+}
+
+func TestEstimateNeverGroksFasterThanUnderstanding(t *testing.T) {
+	t.Parallel()
+	mock := &deciderMock{SystemOneFunc: func(_ context.Context, req jev.Request) (jev.Response, error) {
+		answers := make(map[string]jev.Answer, len(req.Questions))
+		for id, q := range req.Questions {
+			level := "0"
+			if strings.HasSuffix(id, "_"+kindUnderstand) {
+				level = "5"
+			}
+			answers[id] = jev.Answer{Type: q.Type, Probabilities: map[string]float64{level: 1}, Noul: 0.5}
+		}
+		return jev.Response{Answers: answers}, nil
+	}}
+	rep, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "A short passage.")
+	require.NoError(t, err)
+	res := crossfnResult(t, rep)
+	assert.Equal(t, res.Understand, res.Grok)
 }
 
 func TestEstimateWithSpreadDistributionProducesWiderBand(t *testing.T) {
 	t.Parallel()
 	est := NewEstimator(fixedDecider(map[string]float64{"0": 0.05, "1": 0.15, "2": 0.6, "3": 0.15, "4": 0.05}, 0.5), noFetcher(), "jev-latest", 10, testLogger())
-	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 476))
+	rep, err := est.Estimate(t.Context(), "A short passage.")
 	require.NoError(t, err)
 	res := crossfnResult(t, rep)
-	assert.Equal(t, time.Duration(2.8*float64(time.Minute)), res.Understand.Low)
-	assert.Equal(t, 6*time.Minute, res.Understand.High)
+	assert.InDelta(t, math.Sqrt(3), res.Understand.Low.Minutes(), 1e-6)
+	assert.InDelta(t, math.Sqrt(300), res.Understand.High.Minutes(), 1e-6)
 }
 
 func TestEstimateCallsDeciderOncePerChunk(t *testing.T) {
@@ -122,8 +148,7 @@ func TestEstimateAddsLinkedContentWeightedByNeed(t *testing.T) {
 	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 10, testLogger())
 	rep, err := est.Estimate(t.Context(), linkedText)
 	require.NoError(t, err)
-	res := crossfnResult(t, rep)
-	assert.Equal(t, res.Read+30*time.Second, res.Understand.Expected)
+	assert.Equal(t, time.Minute, crossfnResult(t, rep).Understand.Expected)
 }
 
 func TestEstimateReportsNeedAndSkippedLinks(t *testing.T) {
@@ -161,24 +186,29 @@ func TestEstimateWithZeroMaxLinksSkipsFetching(t *testing.T) {
 
 func TestQuantile(t *testing.T) {
 	t.Parallel()
-	levels := comprehensionLevels()
+	levels := understandLevels()
 	tests := []struct {
 		name  string
 		probs []float64
 		q     float64
 		want  float64
 	}{
-		{name: "all mass on first level", probs: []float64{1, 0, 0, 0, 0}, q: 0.9, want: 1.0},
-		{name: "low tail lands on first level with mass", probs: []float64{0, 0.2, 0.8, 0, 0}, q: 0.1, want: 1.4},
-		{name: "high tail lands on last level with mass", probs: []float64{0, 0.2, 0.7, 0.1, 0}, q: 0.9, want: 2.0},
-		{name: "underflowing sum falls back to top level", probs: []float64{0, 0, 0, 0, 0}, q: 0.5, want: 5.0},
+		{name: "all mass on first level", probs: []float64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, q: 0.9, want: 0.5},
+		{name: "low tail lands on first level with mass", probs: []float64{0, 0.2, 0.8, 0, 0, 0, 0, 0, 0, 0}, q: 0.1, want: math.Sqrt(3)},
+		{name: "high tail lands on last level with mass", probs: []float64{0, 0.2, 0.7, 0.1, 0, 0, 0, 0, 0, 0}, q: 0.9, want: math.Sqrt(30)},
+		{name: "underflowing sum falls back to top level", probs: make([]float64, 10), q: 0.5, want: math.Sqrt(24 * 80 * 3600)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, quantile(tt.probs, levels, tt.q))
+			assert.InDelta(t, tt.want, quantile(tt.probs, levels, tt.q), 1e-6)
 		})
 	}
+}
+
+func TestRepresentativeIsGeometricMidpoint(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 2*time.Hour, timeLevel{low: time.Hour, high: 4 * time.Hour}.representative())
 }
 
 func TestDistributionNormalisesProbabilities(t *testing.T) {

@@ -22,13 +22,18 @@ func (r Range) scale(f float64) Range {
 	return Range{Expected: time.Duration(float64(r.Expected) * f), Low: time.Duration(float64(r.Low) * f), High: time.Duration(float64(r.High) * f)}
 }
 
-// band holds expected, low and high values in minutes or as multipliers.
+// band holds expected, low and high values in minutes.
 type band struct {
 	expected, low, high float64
 }
 
 func (b band) add(o band) band {
 	return band{expected: b.expected + o.expected, low: b.low + o.low, high: b.high + o.high}
+}
+
+// atLeast raises each value to the floor's, e.g. so understanding never takes less than reading.
+func (b band) atLeast(floor band) band {
+	return band{expected: max(b.expected, floor.expected), low: max(b.low, floor.low), high: max(b.high, floor.high)}
 }
 
 func (b band) toRange() Range {
@@ -60,12 +65,13 @@ func aggregateAll(audiences []Audience, chunks []chunk, responses []jev.Response
 }
 
 // aggregate sums per-chunk times; summing percentiles assumes chunks of one text are strongly correlated.
+// Read time comes from reading speed; understand and grok come from Jev's time-bucket judgements.
 func aggregate(aud Audience, chunks []chunk, responses []jev.Response) (Result, error) {
 	var understand, grok band
 	var readMinutes, likelihood float64
 	for i, c := range chunks {
 		resp := responses[i]
-		u, err := answerBand(resp, questionID(aud, kindUnderstand), comprehensionLevels())
+		u, err := answerBand(resp, questionID(aud, kindUnderstand), understandLevels())
 		if err != nil {
 			return Result{}, fmt.Errorf("chunk %d: %w", i+1, err)
 		}
@@ -79,8 +85,9 @@ func aggregate(aud Audience, chunks []chunk, responses []jev.Response) (Result, 
 		}
 		read := float64(c.words) / aud.WordsPerMinute
 		readMinutes += read
-		understand = understand.add(band{expected: read * u.expected, low: read * u.low, high: read * u.high})
-		grok = grok.add(band{expected: read * u.expected * g.expected, low: read * u.low * g.low, high: read * u.high * g.high})
+		u = u.atLeast(band{expected: read, low: read, high: read})
+		understand = understand.add(u)
+		grok = grok.add(g.atLeast(u))
 		likelihood += feasible.Noul * float64(c.words)
 	}
 	return Result{
@@ -92,7 +99,7 @@ func aggregate(aud Audience, chunks []chunk, responses []jev.Response) (Result, 
 	}, nil
 }
 
-func answerBand(resp jev.Response, id string, levels []level) (band, error) {
+func answerBand(resp jev.Response, id string, levels []timeLevel) (band, error) {
 	answer, ok := resp.Answers[id]
 	if !ok {
 		return band{}, fmt.Errorf("%s: %w", id, errMissingAnswer)
@@ -102,7 +109,7 @@ func answerBand(resp jev.Response, id string, levels []level) (band, error) {
 		return band{}, fmt.Errorf("%s: %w", id, err)
 	}
 	return band{
-		expected: expectedMultiplier(probs, levels),
+		expected: expectedMinutes(probs, levels),
 		low:      quantile(probs, levels, lowQuantile),
 		high:     quantile(probs, levels, highQuantile),
 	}, nil
@@ -125,21 +132,22 @@ func distribution(answer jev.Answer, n int) ([]float64, error) {
 	return probs, nil
 }
 
-func expectedMultiplier(probs []float64, levels []level) float64 {
+func expectedMinutes(probs []float64, levels []timeLevel) float64 {
 	sum := 0.0
 	for i, p := range probs {
-		sum += p * levels[i].multiplier
+		sum += p * levels[i].representative().Minutes()
 	}
 	return sum
 }
 
-func quantile(probs []float64, levels []level, q float64) float64 {
+// quantile returns the representative minutes of the level where cumulative probability reaches q.
+func quantile(probs []float64, levels []timeLevel, q float64) float64 {
 	cumulative := 0.0
 	for i, p := range probs {
 		cumulative += p
 		if cumulative >= q-quantileTolerance {
-			return levels[i].multiplier
+			return levels[i].representative().Minutes()
 		}
 	}
-	return levels[len(levels)-1].multiplier
+	return levels[len(levels)-1].representative().Minutes()
 }

@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/bobcob7/readtime/internal/estimate"
 )
+
+const workDay = 8 * time.Hour
 
 // Table writes a human-readable table of r to w.
 func Table(w io.Writer, r estimate.Report) error {
@@ -25,7 +28,7 @@ func Table(w io.Writer, r estimate.Report) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing table: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "\n%d words, %d chunk(s), model %s. Times are cumulative; ranges are 10th-90th percentile.\n", r.Words, r.Chunks, r.Model); err != nil {
+	if _, err := fmt.Fprintf(w, "\n%d words, %d chunk(s), model %s. Read uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, r.Chunks, r.Model); err != nil {
 		return fmt.Errorf("writing summary: %w", err)
 	}
 	if len(r.Links) == 0 {
@@ -139,6 +142,13 @@ func formatRange(r estimate.Range) string {
 }
 
 func formatDuration(d time.Duration) string {
+	if d >= workDay {
+		days := math.Round(d.Hours()/workDay.Hours()*10) / 10
+		if days >= 10 {
+			days = math.Round(days)
+		}
+		return strconv.FormatFloat(days, 'f', -1, 64) + "d"
+	}
 	if rounded := d.Round(time.Minute); rounded >= time.Hour {
 		h, m := int(rounded.Hours()), int(rounded.Minutes())%60
 		if m == 0 {

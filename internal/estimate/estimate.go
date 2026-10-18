@@ -31,8 +31,9 @@ type Range struct {
 	High     time.Duration
 }
 
-// Result is the estimate for one audience. Read covers the document alone; Understand and Grok are
-// cumulative and include linked content weighted by how likely the audience needs it.
+// Result is the estimate for one audience. Read comes from reading speed and covers the document alone.
+// Understand and Grok are Jev's estimates of cumulative focused working time, including linked content
+// weighted by how likely the audience needs it.
 type Result struct {
 	Audience       Audience
 	Read           time.Duration

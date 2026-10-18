@@ -40,6 +40,9 @@ func TestFormatDuration(t *testing.T) {
 		{name: "long minutes round to minute", in: 25*time.Minute + 40*time.Second, want: "26m"},
 		{name: "just under an hour rounds up to hours", in: 59*time.Minute + 50*time.Second, want: "1h"},
 		{name: "hours show minutes", in: 2*time.Hour + 5*time.Minute, want: "2h 5m"},
+		{name: "working days past 8h", in: 20 * time.Hour, want: "2.5d"},
+		{name: "whole working days", in: 16 * time.Hour, want: "2d"},
+		{name: "many working days round to whole", in: 99 * time.Hour, want: "12d"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
