@@ -1,10 +1,24 @@
 package estimate
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 type chunk struct {
 	text  string
 	words int
+	// first marks the piece that opens the document.
+	first bool
+}
+
+// wholeText returns text as a single chunk with normalised paragraph breaks.
+func wholeText(text string) chunk {
+	chunks := splitChunks(text, math.MaxInt)
+	if len(chunks) == 0 {
+		return chunk{}
+	}
+	return chunks[0]
 }
 
 // splitChunks groups paragraphs into chunks of at most maxWords, splitting oversized paragraphs by word.
@@ -36,6 +50,9 @@ func splitChunks(text string, maxWords int) []chunk {
 		currentWords += len(words)
 	}
 	flush()
+	if len(chunks) > 0 {
+		chunks[0].first = true
+	}
 	return chunks
 }
 

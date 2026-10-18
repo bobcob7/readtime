@@ -14,7 +14,6 @@ import (
 // linkedDoc is a link from the main text together with its own per-audience estimate.
 type linkedDoc struct {
 	link    links.Link
-	chunk   int
 	words   int
 	results []Result
 	skipped error
@@ -22,7 +21,7 @@ type linkedDoc struct {
 
 // followLinks fetches and estimates every link in text. Fetch failures mark the link skipped;
 // Jev failures abort, since they would also break the main estimate.
-func (e *Estimator) followLinks(ctx context.Context, text string, chunks []chunk, audiences []Audience) ([]linkedDoc, error) {
+func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Audience) ([]linkedDoc, error) {
 	if e.maxLinks <= 0 {
 		return nil, nil
 	}
@@ -36,23 +35,23 @@ func (e *Estimator) followLinks(ctx context.Context, text string, chunks []chunk
 	g.SetLimit(e.concurrency)
 	for i, link := range found {
 		g.Go(func() error {
-			docs[i] = linkedDoc{link: link, chunk: chunkFor(chunks, link)}
+			docs[i] = linkedDoc{link: link}
 			content, err := e.fetcher.Fetch(ctx, link)
 			if err != nil {
 				e.logger.WarnContext(ctx, "skipping link", "target", link.Target, "error", err)
 				docs[i].skipped = err
 				return nil
 			}
-			sub := splitChunks(content, e.chunkWords)
-			if len(sub) == 0 {
+			doc := wholeText(content)
+			if doc.words == 0 {
 				docs[i].skipped = errEmptyInput
 				return nil
 			}
-			results, err := e.estimateLinked(ctx, sub, audiences)
+			results, err := e.estimateLinked(ctx, doc, content, audiences)
 			if err != nil {
 				return fmt.Errorf("estimating link %s: %w", link.Target, err)
 			}
-			docs[i].words, docs[i].results = totalWords(sub), results
+			docs[i].words, docs[i].results = doc.words, results
 			return nil
 		})
 	}
@@ -62,21 +61,40 @@ func (e *Estimator) followLinks(ctx context.Context, text string, chunks []chunk
 	return docs, nil
 }
 
-// chunkFor finds the chunk where link is used, so Jev judges its necessity in context.
-func chunkFor(chunks []chunk, link links.Link) int {
+// estimateLinked estimates a linked document on its own, without following its links.
+func (e *Estimator) estimateLinked(ctx context.Context, doc chunk, text string, audiences []Audience) ([]Result, error) {
+	evals, err := e.evaluate(ctx, doc, questionsFor(audiences, nil, text))
+	if err != nil {
+		return nil, err
+	}
+	return aggregateAll(audiences, evals)
+}
+
+// linkInChunk reports whether c mentions link, so Jev judges its necessity in context.
+// Links that cannot be located anywhere are asked about in the opening chunk.
+func linkInChunk(link links.Link, c chunk, fullText string) bool {
 	needles := []string{"[" + link.Text + "]", link.Target}
+	located := false
 	for _, needle := range needles {
-		for i, c := range chunks {
-			if strings.Contains(c.text, needle) {
-				return i
-			}
+		if strings.Contains(c.text, needle) {
+			return true
+		}
+		located = located || strings.Contains(fullText, needle)
+	}
+	return c.first && !located
+}
+
+func findAnswer(evals []evaluation, id string) (jev.Answer, bool) {
+	for _, ev := range evals {
+		if answer, ok := ev.resp.Answers[id]; ok {
+			return answer, true
 		}
 	}
-	return 0
+	return jev.Answer{}, false
 }
 
 // applyLinks folds each linked document's times into results, weighted by how likely each audience needs it.
-func applyLinks(results []Result, docs []linkedDoc, responses []jev.Response) ([]LinkResult, error) {
+func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkResult, error) {
 	out := make([]LinkResult, 0, len(docs))
 	for i, doc := range docs {
 		lr := LinkResult{Text: doc.link.Text, Target: doc.link.Target, External: doc.link.External}
@@ -88,7 +106,7 @@ func applyLinks(results []Result, docs []linkedDoc, responses []jev.Response) ([
 		lr.Words, lr.NeededBy = doc.words, make(map[string]float64, len(results))
 		for j := range results {
 			id := linkQuestionID(i, results[j].Audience)
-			answer, ok := responses[doc.chunk].Answers[id]
+			answer, ok := findAnswer(evals, id)
 			if !ok {
 				return nil, fmt.Errorf("%s: %w", id, errMissingAnswer)
 			}

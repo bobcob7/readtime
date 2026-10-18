@@ -96,26 +96,25 @@ func buildQuestions(audiences []Audience) map[string]jev.Question {
 	return questions
 }
 
-// chunkQuestions adds, to each chunk's base questions, one question per audience for every link that chunk contains.
-func chunkQuestions(audiences []Audience, chunkCount int, docs []linkedDoc) []map[string]jev.Question {
+// questionsFor returns a builder giving each chunk the base questions plus link questions for the links it contains.
+func questionsFor(audiences []Audience, docs []linkedDoc, fullText string) func(chunk) map[string]jev.Question {
 	base := buildQuestions(audiences)
-	out := make([]map[string]jev.Question, chunkCount)
-	for i := range out {
-		out[i] = maps.Clone(base)
-	}
-	for i, doc := range docs {
-		if doc.skipped != nil {
-			continue
+	return func(c chunk) map[string]jev.Question {
+		questions := maps.Clone(base)
+		for i, doc := range docs {
+			if doc.skipped != nil || !linkInChunk(doc.link, c, fullText) {
+				continue
+			}
+			for _, aud := range audiences {
+				questions[linkQuestionID(i, aud)] = jev.Noul(
+					fmt.Sprintf("The reader is %s. The text links to %q (%s). Would this reader need to read the linked content to understand the text?", aud.Description, doc.link.Text, doc.link.Target),
+					"The reader must read the linked content; the text depends on it",
+					"The link is optional background or reference for this reader",
+				)
+			}
 		}
-		for _, aud := range audiences {
-			out[doc.chunk][linkQuestionID(i, aud)] = jev.Noul(
-				fmt.Sprintf("The reader is %s. The text links to %q (%s). Would this reader need to read the linked content to understand the text?", aud.Description, doc.link.Text, doc.link.Target),
-				"The reader must read the linked content; the text depends on it",
-				"The link is optional background or reference for this reader",
-			)
-		}
+		return questions
 	}
-	return out
 }
 
 func questionID(aud Audience, kind string) string {

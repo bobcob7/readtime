@@ -3,6 +3,7 @@ package jev
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -80,4 +81,24 @@ func TestSystemOneGivesUpAfterMaxRetries(t *testing.T) {
 	_, err := client.SystemOne(t.Context(), Request{State: "hi", Model: DefaultModel})
 	require.Error(t, err)
 	assert.Equal(t, int32(defaultMaxRetries+1), calls.Load())
+}
+
+func TestIsContextExceeded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "context overflow", err: &APIError{StatusCode: http.StatusBadRequest, Body: `{"error":"max_tokens_exceeded"}`}, want: true},
+		{name: "other bad request", err: &APIError{StatusCode: http.StatusBadRequest, Body: `{"error":"bad model"}`}, want: false},
+		{name: "wrapped overflow", err: fmt.Errorf("wrap: %w", &APIError{StatusCode: http.StatusBadRequest, Body: "max_tokens_exceeded"}), want: true},
+		{name: "non-api error", err: errors.New("boom"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsContextExceeded(tt.err))
+		})
+	}
 }

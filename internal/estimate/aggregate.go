@@ -44,18 +44,16 @@ func minutes(m float64) time.Duration {
 	return time.Duration(m * float64(time.Minute))
 }
 
-func totalWords(chunks []chunk) int {
-	words := 0
-	for _, c := range chunks {
-		words += c.words
-	}
-	return words
+// evaluation is one chunk and Jev's answers about it.
+type evaluation struct {
+	chunk chunk
+	resp  jev.Response
 }
 
-func aggregateAll(audiences []Audience, chunks []chunk, responses []jev.Response) ([]Result, error) {
+func aggregateAll(audiences []Audience, evals []evaluation) ([]Result, error) {
 	results := make([]Result, 0, len(audiences))
 	for _, aud := range audiences {
-		res, err := aggregate(aud, chunks, responses)
+		res, err := aggregate(aud, evals)
 		if err != nil {
 			return nil, fmt.Errorf("aggregating %s: %w", aud.ID, err)
 		}
@@ -64,13 +62,14 @@ func aggregateAll(audiences []Audience, chunks []chunk, responses []jev.Response
 	return results, nil
 }
 
-// aggregate sums per-chunk times; summing percentiles assumes chunks of one text are strongly correlated.
+// aggregate sums times across chunks (usually just one); summing percentiles assumes chunks of one text are strongly correlated.
 // Read time comes from reading speed; understand and grok come from Jev's time-bucket judgements.
-func aggregate(aud Audience, chunks []chunk, responses []jev.Response) (Result, error) {
+func aggregate(aud Audience, evals []evaluation) (Result, error) {
 	var understand, grok band
 	var readMinutes, likelihood float64
-	for i, c := range chunks {
-		resp := responses[i]
+	words := 0
+	for i, ev := range evals {
+		c, resp := ev.chunk, ev.resp
 		u, err := answerBand(resp, questionID(aud, kindUnderstand), understandLevels())
 		if err != nil {
 			return Result{}, fmt.Errorf("chunk %d: %w", i+1, err)
@@ -89,13 +88,14 @@ func aggregate(aud Audience, chunks []chunk, responses []jev.Response) (Result, 
 		understand = understand.add(u)
 		grok = grok.add(g.atLeast(u))
 		likelihood += feasible.Noul * float64(c.words)
+		words += c.words
 	}
 	return Result{
 		Audience:       aud,
 		Read:           minutes(readMinutes),
 		Understand:     understand.toRange(),
 		Grok:           grok.toRange(),
-		GrokLikelihood: likelihood / float64(totalWords(chunks)),
+		GrokLikelihood: likelihood / float64(words),
 	}, nil
 }
 

@@ -82,6 +82,12 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("system one returned %d: %s", e.StatusCode, e.Body)
 }
 
+// IsContextExceeded reports whether err means the request was longer than the model's context length.
+func IsContextExceeded(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest && strings.Contains(apiErr.Body, "max_tokens_exceeded")
+}
+
 func (e *APIError) retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode == statusOverloaded
 }

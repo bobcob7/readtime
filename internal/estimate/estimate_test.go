@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -95,15 +96,43 @@ func TestEstimateWithSpreadDistributionProducesWiderBand(t *testing.T) {
 	assert.InDelta(t, math.Sqrt(300), res.Understand.High.Minutes(), 1e-6)
 }
 
-func TestEstimateCallsDeciderOncePerChunk(t *testing.T) {
+// overflowingDecider rejects any request whose state matches tooLong, as Jev does past its context length.
+func overflowingDecider(tooLong func(state string) bool) *deciderMock {
+	inner := fixedDecider(map[string]float64{"0": 1}, 0.5)
+	return &deciderMock{SystemOneFunc: func(ctx context.Context, req jev.Request) (jev.Response, error) {
+		if tooLong(req.State.(string)) {
+			return jev.Response{}, &jev.APIError{StatusCode: http.StatusBadRequest, Body: `{"error":"max_tokens_exceeded"}`}
+		}
+		return inner.SystemOne(ctx, req)
+	}}
+}
+
+func TestEstimateSendsWholeDocumentInOneRequest(t *testing.T) {
 	t.Parallel()
 	mock := fixedDecider(map[string]float64{"0": 1}, 1)
-	est := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger())
-	est.chunkWords = 10
-	rep, err := est.Estimate(t.Context(), strings.Repeat("word ", 25))
+	paragraph := strings.Repeat("word ", 1000)
+	rep, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), paragraph+"\n\n"+paragraph+"\n\n"+paragraph)
 	require.NoError(t, err)
-	assert.Len(t, mock.SystemOneCalls(), 3)
-	assert.Equal(t, 25, rep.Words)
+	assert.Len(t, mock.SystemOneCalls(), 1)
+	assert.Equal(t, 1, rep.Chunks)
+}
+
+func TestEstimateSplitsInHalfWhenContextExceeded(t *testing.T) {
+	t.Parallel()
+	mock := overflowingDecider(func(state string) bool { return len(strings.Fields(state)) > 100 })
+	paragraph := strings.Repeat("word ", 60)
+	rep, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), strings.Repeat(paragraph+"\n\n", 4))
+	require.NoError(t, err)
+	assert.Equal(t, 4, rep.Chunks)
+	assert.Equal(t, 240, rep.Words)
+	assert.Len(t, mock.SystemOneCalls(), 7)
+}
+
+func TestEstimateFailsWhenTextCannotBeSplitSmallEnough(t *testing.T) {
+	t.Parallel()
+	mock := overflowingDecider(func(string) bool { return true })
+	_, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "too long")
+	assert.True(t, jev.IsContextExceeded(err))
 }
 
 func TestEstimateRejectsEmptyInput(t *testing.T) {
@@ -163,15 +192,22 @@ func TestEstimateReportsNeedAndSkippedLinks(t *testing.T) {
 
 func TestEstimateAsksLinkQuestionsOnlyInChunkContainingLink(t *testing.T) {
 	t.Parallel()
-	mock := fixedDecider(map[string]float64{"0": 1}, 0.5)
-	est := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger())
-	est.chunkWords = 5
-	_, err := est.Estimate(t.Context(), "one two three four five\n\n"+linkedText)
+	mock := overflowingDecider(func(state string) bool {
+		return strings.Contains(state, "one two") && strings.Contains(state, "[the guide]")
+	})
+	_, err := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "one two three four five\n\n"+linkedText)
 	require.NoError(t, err)
 	for _, call := range mock.SystemOneCalls() {
+		state := call.Req.State.(string)
 		_, asked := call.Req.Questions[linkQuestionID(0, Audiences()[0])]
-		assert.Equal(t, strings.Contains(call.Req.State.(string), "[the guide]"), asked)
+		assert.Equal(t, strings.Contains(state, "[the guide]"), asked, state)
 	}
+}
+
+func TestLinkInChunkFallsBackToOpeningChunk(t *testing.T) {
+	t.Parallel()
+	link := links.Link{Text: "escaped", Target: "my%20file.md"}
+	assert.True(t, linkInChunk(link, chunk{text: "intro", first: true}, "intro [esc\\aped](<my file.md>)"))
 }
 
 func TestEstimateWithZeroMaxLinksSkipsFetching(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -13,10 +14,7 @@ import (
 	"github.com/bobcob7/readtime/internal/jev"
 )
 
-const (
-	defaultChunkWords  = 1500
-	defaultConcurrency = 4
-)
+const defaultConcurrency = 4
 
 var (
 	errEmptyInput      = errors.New("input contains no words")
@@ -68,7 +66,6 @@ type Estimator struct {
 	fetcher     linkFetcher
 	model       string
 	maxLinks    int
-	chunkWords  int
 	concurrency int
 	logger      *slog.Logger
 }
@@ -80,7 +77,6 @@ func NewEstimator(d decider, f linkFetcher, model string, maxLinks int, logger *
 		fetcher:     f,
 		model:       model,
 		maxLinks:    maxLinks,
-		chunkWords:  defaultChunkWords,
 		concurrency: defaultConcurrency,
 		logger:      logger,
 	}
@@ -88,56 +84,58 @@ func NewEstimator(d decider, f linkFetcher, model string, maxLinks int, logger *
 
 // Estimate returns per-audience time estimates for text, including essential linked content.
 func (e *Estimator) Estimate(ctx context.Context, text string) (Report, error) {
-	chunks := splitChunks(text, e.chunkWords)
-	if len(chunks) == 0 {
+	doc := wholeText(text)
+	if doc.words == 0 {
 		return Report{}, errEmptyInput
 	}
 	audiences := Audiences()
-	docs, err := e.followLinks(ctx, text, chunks, audiences)
+	docs, err := e.followLinks(ctx, text, audiences)
 	if err != nil {
 		return Report{}, err
 	}
-	responses, err := e.evaluate(ctx, chunks, chunkQuestions(audiences, len(chunks), docs))
+	evals, err := e.evaluate(ctx, doc, questionsFor(audiences, docs, text))
 	if err != nil {
 		return Report{}, err
 	}
-	results, err := aggregateAll(audiences, chunks, responses)
+	results, err := aggregateAll(audiences, evals)
 	if err != nil {
 		return Report{}, err
 	}
-	linkResults, err := applyLinks(results, docs, responses)
+	linkResults, err := applyLinks(results, docs, evals)
 	if err != nil {
 		return Report{}, err
 	}
-	return Report{Words: totalWords(chunks), Chunks: len(chunks), Model: responses[0].Model, Results: results, Links: linkResults}, nil
+	return Report{Words: doc.words, Chunks: len(evals), Model: evals[0].resp.Model, Results: results, Links: linkResults}, nil
 }
 
-// estimateLinked estimates a linked document on its own, without following its links.
-func (e *Estimator) estimateLinked(ctx context.Context, chunks []chunk, audiences []Audience) ([]Result, error) {
-	responses, err := e.evaluate(ctx, chunks, chunkQuestions(audiences, len(chunks), nil))
-	if err != nil {
-		return nil, err
+// evaluate sends c whole, splitting it in half (recursively) only when it exceeds the model's context length.
+func (e *Estimator) evaluate(ctx context.Context, c chunk, questionsFor func(chunk) map[string]jev.Question) ([]evaluation, error) {
+	resp, err := e.decider.SystemOne(ctx, jev.Request{State: c.text, Model: e.model, Questions: questionsFor(c)})
+	if err == nil {
+		e.logger.DebugContext(ctx, "text evaluated", "words", c.words, "input_tokens", resp.Usage.InputTokens)
+		return []evaluation{{chunk: c, resp: resp}}, nil
 	}
-	return aggregateAll(audiences, chunks, responses)
-}
-
-func (e *Estimator) evaluate(ctx context.Context, chunks []chunk, questions []map[string]jev.Question) ([]jev.Response, error) {
-	responses := make([]jev.Response, len(chunks))
+	if !jev.IsContextExceeded(err) {
+		return nil, fmt.Errorf("evaluating %d words: %w", c.words, err)
+	}
+	parts := splitChunks(c.text, (c.words+1)/2)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("evaluating %d words: %w", c.words, err)
+	}
+	parts[0].first = c.first
+	e.logger.DebugContext(ctx, "text exceeds model context; splitting", "words", c.words, "parts", len(parts))
+	evals := make([][]evaluation, len(parts))
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(e.concurrency)
-	for i, c := range chunks {
+	for i, part := range parts {
 		g.Go(func() error {
-			resp, err := e.decider.SystemOne(ctx, jev.Request{State: c.text, Model: e.model, Questions: questions[i]})
-			if err != nil {
-				return fmt.Errorf("evaluating chunk %d: %w", i+1, err)
-			}
-			e.logger.DebugContext(ctx, "chunk evaluated", "chunk", i+1, "words", c.words, "input_tokens", resp.Usage.InputTokens)
-			responses[i] = resp
-			return nil
+			var err error
+			evals[i], err = e.evaluate(ctx, part, questionsFor)
+			return err
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
-	return responses, nil
+	return slices.Concat(evals...), nil
 }
