@@ -1,0 +1,113 @@
+// Package report renders estimates as a terminal table or JSON.
+package report
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"text/tabwriter"
+	"time"
+
+	"github.com/bobcob7/readtime/internal/estimate"
+)
+
+// Table writes a human-readable table of r to w.
+func Table(w io.Writer, r estimate.Report) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "AUDIENCE\tWPM\tREAD\tUNDERSTAND\tGROK\tCAN GROK")
+	for _, res := range r.Results {
+		fmt.Fprintf(tw, "%s\t%.0f\t%s\t%s\t%s\t%.0f%%\n",
+			res.Audience.Name, res.Audience.WordsPerMinute, formatDuration(res.Read),
+			formatRange(res.Understand), formatRange(res.Grok), res.GrokLikelihood*100)
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("writing table: %w", err)
+	}
+	if _, err := fmt.Fprintf(w, "\n%d words, %d chunk(s), model %s. Times are cumulative; ranges are 10th-90th percentile.\n", r.Words, r.Chunks, r.Model); err != nil {
+		return fmt.Errorf("writing summary: %w", err)
+	}
+	return nil
+}
+
+type jsonRange struct {
+	ExpectedSeconds float64 `json:"expected_seconds"`
+	LowSeconds      float64 `json:"low_seconds"`
+	HighSeconds     float64 `json:"high_seconds"`
+}
+
+type jsonResult struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	WordsPerMinute float64   `json:"words_per_minute"`
+	ReadSeconds    float64   `json:"read_seconds"`
+	Understand     jsonRange `json:"understand"`
+	Grok           jsonRange `json:"grok"`
+	GrokLikelihood float64   `json:"grok_likelihood"`
+}
+
+type jsonReport struct {
+	Words     int          `json:"words"`
+	Chunks    int          `json:"chunks"`
+	Model     string       `json:"model"`
+	Audiences []jsonResult `json:"audiences"`
+}
+
+// JSON writes r to w as indented JSON with durations in seconds.
+func JSON(w io.Writer, r estimate.Report) error {
+	out := jsonReport{Words: r.Words, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results))}
+	for _, res := range r.Results {
+		out.Audiences = append(out.Audiences, jsonResult{
+			ID:             res.Audience.ID,
+			Name:           res.Audience.Name,
+			WordsPerMinute: res.Audience.WordsPerMinute,
+			ReadSeconds:    seconds(res.Read),
+			Understand:     toJSONRange(res.Understand),
+			Grok:           toJSONRange(res.Grok),
+			GrokLikelihood: math.Round(res.GrokLikelihood*1000) / 1000,
+		})
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		return fmt.Errorf("encoding json: %w", err)
+	}
+	return nil
+}
+
+func toJSONRange(r estimate.Range) jsonRange {
+	return jsonRange{ExpectedSeconds: seconds(r.Expected), LowSeconds: seconds(r.Low), HighSeconds: seconds(r.High)}
+}
+
+func seconds(d time.Duration) float64 {
+	return math.Round(d.Seconds()*10) / 10
+}
+
+func formatRange(r estimate.Range) string {
+	if formatDuration(r.Low) == formatDuration(r.High) {
+		return formatDuration(r.Expected)
+	}
+	return fmt.Sprintf("%s (%s-%s)", formatDuration(r.Expected), formatDuration(r.Low), formatDuration(r.High))
+}
+
+func formatDuration(d time.Duration) string {
+	if rounded := d.Round(time.Minute); rounded >= time.Hour {
+		h, m := int(rounded.Hours()), int(rounded.Minutes())%60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if d >= 10*time.Minute {
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute).Minutes()))
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m, s := int(d.Minutes()), int(d.Seconds())%60
+	if s == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%dm %ds", m, s)
+}

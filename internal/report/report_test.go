@@ -1,0 +1,67 @@
+package report
+
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/bobcob7/readtime/internal/estimate"
+)
+
+func sampleReport() estimate.Report {
+	return estimate.Report{
+		Words:  476,
+		Chunks: 1,
+		Model:  "jev-test",
+		Results: []estimate.Result{{
+			Audience:       estimate.Audience{ID: "adult", Name: "General adult", WordsPerMinute: 238},
+			Read:           2 * time.Minute,
+			Understand:     estimate.Range{Expected: 3 * time.Minute, Low: 2 * time.Minute, High: 4 * time.Minute},
+			Grok:           estimate.Range{Expected: 9 * time.Minute, Low: 5 * time.Minute, High: 20 * time.Minute},
+			GrokLikelihood: 0.87,
+		}},
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{name: "sub-minute shows seconds", in: 42 * time.Second, want: "42s"},
+		{name: "short minutes show seconds", in: 3*time.Minute + 20*time.Second, want: "3m 20s"},
+		{name: "whole minutes drop seconds", in: 4 * time.Minute, want: "4m"},
+		{name: "long minutes round to minute", in: 25*time.Minute + 40*time.Second, want: "26m"},
+		{name: "just under an hour rounds up to hours", in: 59*time.Minute + 50*time.Second, want: "1h"},
+		{name: "hours show minutes", in: 2*time.Hour + 5*time.Minute, want: "2h 5m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, formatDuration(tt.in))
+		})
+	}
+}
+
+func TestTableIncludesAudienceRow(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	require.NoError(t, Table(&buf, sampleReport()))
+	assert.Contains(t, buf.String(), "General adult  238  2m    3m (2m-4m)  9m (5m-20m)  87%")
+}
+
+func TestJSONReportsDurationsInSeconds(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	require.NoError(t, JSON(&buf, sampleReport()))
+	var got jsonReport
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Len(t, got.Audiences, 1)
+	assert.Equal(t, jsonRange{ExpectedSeconds: 540, LowSeconds: 300, HighSeconds: 1200}, got.Audiences[0].Grok)
+}
