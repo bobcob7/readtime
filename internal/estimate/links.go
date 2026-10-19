@@ -15,6 +15,7 @@ import (
 type linkedDoc struct {
 	link    links.Link
 	words   int
+	chunks  int
 	results []Result
 	skipped error
 }
@@ -47,11 +48,11 @@ func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Au
 				docs[i].skipped = errEmptyInput
 				return nil
 			}
-			results, err := e.estimateLinked(ctx, doc, content, audiences)
+			results, chunks, err := e.estimateLinked(ctx, doc, content, audiences)
 			if err != nil {
 				return fmt.Errorf("estimating link %s: %w", link.Target, err)
 			}
-			docs[i].words, docs[i].results = doc.words, results
+			docs[i].words, docs[i].chunks, docs[i].results = doc.words, chunks, results
 			return nil
 		})
 	}
@@ -62,12 +63,14 @@ func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Au
 }
 
 // estimateLinked estimates a linked document on its own, without following its links.
-func (e *Estimator) estimateLinked(ctx context.Context, doc chunk, text string, audiences []Audience) ([]Result, error) {
+// It also returns how many chunks the document was split into.
+func (e *Estimator) estimateLinked(ctx context.Context, doc chunk, text string, audiences []Audience) ([]Result, int, error) {
 	evals, err := e.evaluate(ctx, doc, questionsFor(audiences, nil, text))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return aggregateAll(audiences, evals)
+	results, err := aggregateAll(audiences, evals)
+	return results, len(evals), err
 }
 
 // linkInChunk reports whether c mentions link, so Jev judges its necessity in context.
@@ -103,7 +106,7 @@ func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkR
 			out = append(out, lr)
 			continue
 		}
-		lr.Words, lr.NeededBy = doc.words, make(map[string]float64, len(results))
+		lr.Words, lr.Chunks, lr.NeededBy = doc.words, doc.chunks, make(map[string]float64, len(results))
 		for j := range results {
 			id := linkQuestionID(i, results[j].Audience)
 			answer, ok := findAnswer(evals, id)

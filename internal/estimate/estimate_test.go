@@ -186,7 +186,7 @@ func TestEstimateReportsNeedAndSkippedLinks(t *testing.T) {
 	rep, err := est.Estimate(t.Context(), linkedText)
 	require.NoError(t, err)
 	require.Len(t, rep.Links, 2)
-	assert.Equal(t, LinkResult{Text: "the guide", Target: "guide.md", Words: 238, NeededBy: map[string]float64{"esl": 0.5, "crossfn": 0.5, "junior": 0.5, "senior": 0.5, "expert": 0.5}}, rep.Links[0])
+	assert.Equal(t, LinkResult{Text: "the guide", Target: "guide.md", Words: 238, Chunks: 1, NeededBy: map[string]float64{"esl": 0.5, "crossfn": 0.5, "junior": 0.5, "senior": 0.5, "expert": 0.5}}, rep.Links[0])
 	assert.Equal(t, LinkResult{Text: "the spec", Target: "https://example.com/spec", External: true, Skipped: "external links disabled"}, rep.Links[1])
 }
 
@@ -290,4 +290,12 @@ func TestSplitChunks(t *testing.T) {
 			assert.Equal(t, tt.wantWords, got)
 		})
 	}
+}
+
+func TestEstimateCountsFollowedDocumentsAndAllChunks(t *testing.T) {
+	t.Parallel()
+	mock := overflowingDecider(func(state string) bool { return strings.Count(state, "word") > 200 })
+	rep, err := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), linkedText)
+	require.NoError(t, err)
+	assert.Equal(t, [2]int{2, 3}, [2]int{rep.Documents, rep.Chunks})
 }

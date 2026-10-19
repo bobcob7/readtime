@@ -46,18 +46,21 @@ type LinkResult struct {
 	Target   string
 	External bool
 	Words    int
+	Chunks   int
 	// NeededBy maps audience ID to the probability that audience must read the link.
 	NeededBy map[string]float64
 	Skipped  string
 }
 
-// Report is the full estimate for a piece of text.
+// Report is the full estimate for a piece of text. Words counts the main document; Documents and
+// Chunks count everything sent to Jev, including followed links.
 type Report struct {
-	Words   int
-	Chunks  int
-	Model   string
-	Results []Result
-	Links   []LinkResult
+	Words     int
+	Documents int
+	Chunks    int
+	Model     string
+	Results   []Result
+	Links     []LinkResult
 }
 
 // Estimator asks Jev how hard text is for each audience and converts the answers to durations.
@@ -105,7 +108,14 @@ func (e *Estimator) Estimate(ctx context.Context, text string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	return Report{Words: doc.words, Chunks: len(evals), Model: evals[0].resp.Model, Results: results, Links: linkResults}, nil
+	documents, chunks := 1, len(evals)
+	for _, link := range linkResults {
+		if link.Skipped == "" {
+			documents++
+			chunks += link.Chunks
+		}
+	}
+	return Report{Words: doc.words, Documents: documents, Chunks: chunks, Model: evals[0].resp.Model, Results: results, Links: linkResults}, nil
 }
 
 // evaluate sends c whole, splitting it in half (recursively) only when it exceeds the model's context length.

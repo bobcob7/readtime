@@ -14,9 +14,10 @@ import (
 
 func sampleReport() estimate.Report {
 	return estimate.Report{
-		Words:  476,
-		Chunks: 1,
-		Model:  "jev-test",
+		Words:     476,
+		Documents: 1,
+		Chunks:    1,
+		Model:     "jev-test",
 		Results: []estimate.Result{{
 			Audience:       estimate.Audience{ID: "adult", Name: "General adult", WordsPerMinute: 238},
 			Read:           2 * time.Minute,
@@ -87,4 +88,31 @@ func TestTableOmitsLinkSectionWithoutLinks(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, Table(&buf, sampleReport()))
 	assert.NotContains(t, buf.String(), "LINK")
+}
+
+func TestTableSummarisesDocumentsAndChunksProcessed(t *testing.T) {
+	t.Parallel()
+	rep := sampleReport()
+	rep.Documents, rep.Chunks = 3, 5
+	var buf bytes.Buffer
+	require.NoError(t, Table(&buf, rep))
+	assert.Contains(t, buf.String(), "476 words; processed 3 documents in 5 chunks; model jev-test.")
+}
+
+func TestTableUsesSingularForOneDocumentAndChunk(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	require.NoError(t, Table(&buf, sampleReport()))
+	assert.Contains(t, buf.String(), "processed 1 document in 1 chunk;")
+}
+
+func TestJSONIncludesDocumentAndChunkCounts(t *testing.T) {
+	t.Parallel()
+	rep := sampleReport()
+	rep.Documents, rep.Chunks = 2, 4
+	var buf bytes.Buffer
+	require.NoError(t, JSON(&buf, rep))
+	var got jsonReport
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, [2]int{2, 4}, [2]int{got.Documents, got.Chunks})
 }

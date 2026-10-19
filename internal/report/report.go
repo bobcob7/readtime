@@ -28,7 +28,7 @@ func Table(w io.Writer, r estimate.Report) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing table: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "\n%d words, %d chunk(s), model %s. Read uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, r.Chunks, r.Model); err != nil {
+	if _, err := fmt.Fprintf(w, "\n%d words; processed %s in %s; model %s.\nRead uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, plural(r.Documents, "document"), plural(r.Chunks, "chunk"), r.Model); err != nil {
 		return fmt.Errorf("writing summary: %w", err)
 	}
 	if len(r.Links) == 0 {
@@ -89,12 +89,14 @@ type jsonLink struct {
 	Target   string             `json:"target"`
 	External bool               `json:"external"`
 	Words    int                `json:"words,omitempty"`
+	Chunks   int                `json:"chunks,omitempty"`
 	NeededBy map[string]float64 `json:"needed_by,omitempty"`
 	Skipped  string             `json:"skipped,omitempty"`
 }
 
 type jsonReport struct {
 	Words     int          `json:"words"`
+	Documents int          `json:"documents"`
 	Chunks    int          `json:"chunks"`
 	Model     string       `json:"model"`
 	Audiences []jsonResult `json:"audiences"`
@@ -103,7 +105,7 @@ type jsonReport struct {
 
 // JSON writes r to w as indented JSON with durations in seconds.
 func JSON(w io.Writer, r estimate.Report) error {
-	out := jsonReport{Words: r.Words, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results)), Links: make([]jsonLink, 0, len(r.Links))}
+	out := jsonReport{Words: r.Words, Documents: r.Documents, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results)), Links: make([]jsonLink, 0, len(r.Links))}
 	for _, link := range r.Links {
 		out.Links = append(out.Links, jsonLink(link))
 	}
@@ -132,6 +134,13 @@ func toJSONRange(r estimate.Range) jsonRange {
 
 func seconds(d time.Duration) float64 {
 	return math.Round(d.Seconds()*10) / 10
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func formatRange(r estimate.Range) string {
