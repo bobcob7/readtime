@@ -96,6 +96,54 @@ func buildQuestions(audiences []Audience) map[string]jev.Question {
 	return questions
 }
 
+// understandQuestions asks only how long each audience needs to understand a linked document.
+func understandQuestions(audiences []Audience) map[string]jev.Question {
+	questions := make(map[string]jev.Question, len(audiences))
+	for id, q := range buildQuestions(audiences) {
+		for _, aud := range audiences {
+			if id == questionID(aud, kindUnderstand) {
+				questions[id] = q
+			}
+		}
+	}
+	return questions
+}
+
+// relations classify how a linked document relates to the text that links to it.
+func relations() map[string]any {
+	return map[string]any{
+		"core":            "Content the text builds on directly; its argument depends on it",
+		"prerequisite":    "Background knowledge the text assumes the reader already has",
+		"source":          "A citation or evidence backing a claim the text already states",
+		"reference":       "Documentation, a specification or glossary consulted for specific details",
+		"example":         "An example, demo or sample illustrating the text",
+		"further_reading": "Related or optional material beyond the text's scope",
+		"navigation":      "A navigation, tooling or administrative link such as a repository, issue tracker or contact page",
+	}
+}
+
+// engagement modes describe how a reader uses a linked document while understanding the text,
+// ordered from least to most effort. Their time costs live in engagementMinutes.
+const (
+	engageSkip   = "skip"
+	engageGlance = "glance"
+	engageLookup = "lookup"
+	engageSkim   = "skim"
+	engageRead   = "read"
+	engageStudy  = "study"
+)
+
+func engagements() map[string]any {
+	return map[string]any{
+		engageSkip:   "Does not open it",
+		engageGlance: "Opens it briefly to see what it is, then returns",
+		engageLookup: "Looks up one specific detail in it",
+		engageSkim:   "Skims it for the relevant parts",
+		engageRead:   "Reads it through once",
+		engageStudy:  "Reads it carefully until they understand it",
+	}
+}
+
 // questionsFor returns a builder giving each chunk the base questions plus link questions for the links it contains.
 func questionsFor(audiences []Audience, docs []linkedDoc, fullText string) func(chunk) map[string]jev.Question {
 	base := buildQuestions(audiences)
@@ -105,11 +153,14 @@ func questionsFor(audiences []Audience, docs []linkedDoc, fullText string) func(
 			if doc.skipped != nil || !linkInChunk(doc.link, c, fullText) {
 				continue
 			}
+			questions[linkRelationID(i)] = jev.Choice(
+				fmt.Sprintf("The text links to %q (%s). How does the linked content relate to the text?", doc.link.Text, doc.link.Target),
+				relations(),
+			)
 			for _, aud := range audiences {
-				questions[linkQuestionID(i, aud)] = jev.Noul(
-					fmt.Sprintf("The reader is %s. The text links to %q (%s). Would this reader need to read the linked content to understand the text?", aud.Description, doc.link.Text, doc.link.Target),
-					"The reader must read the linked content; the text depends on it",
-					"The link is optional background or reference for this reader",
+				questions[linkEngagementID(i, aud)] = jev.Choice(
+					fmt.Sprintf("The reader is %s and is working to understand the text. The text links to %q (%s). How would this reader engage with the linked content?", aud.Description, doc.link.Text, doc.link.Target),
+					engagements(),
 				)
 			}
 		}
@@ -121,6 +172,10 @@ func questionID(aud Audience, kind string) string {
 	return aud.ID + "_" + kind
 }
 
-func linkQuestionID(linkIndex int, aud Audience) string {
-	return fmt.Sprintf("link%d_%s_needed", linkIndex, aud.ID)
+func linkRelationID(linkIndex int) string {
+	return fmt.Sprintf("link%d_relation", linkIndex)
+}
+
+func linkEngagementID(linkIndex int, aud Audience) string {
+	return fmt.Sprintf("link%d_%s_engagement", linkIndex, aud.ID)
 }

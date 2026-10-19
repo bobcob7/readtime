@@ -40,23 +40,30 @@ type Result struct {
 	GrokLikelihood float64
 }
 
-// LinkResult describes one followed (or skipped) link.
+// LinkResult describes how a link adds to the time to understand the main document.
 type LinkResult struct {
 	Text     string
 	Target   string
 	External bool
 	Words    int
-	Chunks   int
-	// NeededBy maps audience ID to the probability that audience must read the link.
-	NeededBy map[string]float64
-	Skipped  string
+	// Relation is Jev's classification of how the linked content relates to the main document.
+	Relation string
+	// Evaluated reports whether Jev estimated the linked document itself, done only when someone may study it.
+	Evaluated bool
+	Chunks    int
+	// Engagement maps audience ID to the most likely way that audience uses the link.
+	Engagement map[string]string
+	// Added maps audience ID to the probability-weighted time the link adds to understanding.
+	Added   map[string]Range
+	Skipped string
 }
 
-// Report is the full estimate for a piece of text. Words counts the main document; Documents and
-// Chunks count everything sent to Jev, including followed links.
+// Report is the full estimate for a piece of text. Words counts the main document. Documents counts
+// it plus every fetched link; Evaluated and Chunks count the documents and pieces Jev assessed.
 type Report struct {
 	Words     int
 	Documents int
+	Evaluated int
 	Chunks    int
 	Model     string
 	Results   []Result
@@ -85,17 +92,14 @@ func NewEstimator(d decider, f linkFetcher, model string, maxLinks int, logger *
 	}
 }
 
-// Estimate returns per-audience time estimates for text, including essential linked content.
+// Estimate returns per-audience time estimates for text, including time spent on its links.
 func (e *Estimator) Estimate(ctx context.Context, text string) (Report, error) {
 	doc := wholeText(text)
 	if doc.words == 0 {
 		return Report{}, errEmptyInput
 	}
 	audiences := Audiences()
-	docs, err := e.followLinks(ctx, text, audiences)
-	if err != nil {
-		return Report{}, err
-	}
+	docs := e.fetchLinks(ctx, text)
 	evals, err := e.evaluate(ctx, doc, questionsFor(audiences, docs, text))
 	if err != nil {
 		return Report{}, err
@@ -104,18 +108,24 @@ func (e *Estimator) Estimate(ctx context.Context, text string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	if err := e.studyLinks(ctx, audiences, docs, evals); err != nil {
+		return Report{}, err
+	}
 	linkResults, err := applyLinks(results, docs, evals)
 	if err != nil {
 		return Report{}, err
 	}
-	documents, chunks := 1, len(evals)
+	rep := Report{Words: doc.words, Documents: 1, Evaluated: 1, Chunks: len(evals), Model: evals[0].resp.Model, Results: results, Links: linkResults}
 	for _, link := range linkResults {
 		if link.Skipped == "" {
-			documents++
-			chunks += link.Chunks
+			rep.Documents++
+		}
+		if link.Evaluated {
+			rep.Evaluated++
+			rep.Chunks += link.Chunks
 		}
 	}
-	return Report{Words: doc.words, Documents: documents, Chunks: chunks, Model: evals[0].resp.Model, Results: results, Links: linkResults}, nil
+	return rep, nil
 }
 
 // evaluate sends c whole, splitting it in half (recursively) only when it exceeds the model's context length.

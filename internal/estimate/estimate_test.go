@@ -22,15 +22,28 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
-// fixedDecider answers every score question with probs and every noul question with noul.
-func fixedDecider(probs map[string]float64, noul float64) *deciderMock {
+// engagingDecider answers score questions with probs, noul questions with noul, link relations
+// with "source" and link engagement with mode.
+func engagingDecider(probs map[string]float64, noul float64, mode string) *deciderMock {
 	return &deciderMock{SystemOneFunc: func(_ context.Context, req jev.Request) (jev.Response, error) {
 		answers := make(map[string]jev.Answer, len(req.Questions))
 		for id, q := range req.Questions {
-			answers[id] = jev.Answer{Type: q.Type, Probabilities: probs, Noul: noul}
+			answer := jev.Answer{Type: q.Type, Probabilities: probs, Noul: noul}
+			if q.Type == "choice" {
+				answer.Choice = mode
+				if strings.HasSuffix(id, "_relation") {
+					answer.Choice = "source"
+				}
+				answer.Probabilities = map[string]float64{answer.Choice: 1}
+			}
+			answers[id] = answer
 		}
 		return jev.Response{Model: "jev-test", Answers: answers}, nil
 	}}
+}
+
+func fixedDecider(probs map[string]float64, noul float64) *deciderMock {
+	return engagingDecider(probs, noul, engageSkim)
 }
 
 func noFetcher() *linkFetcherMock {
@@ -97,8 +110,8 @@ func TestEstimateWithSpreadDistributionProducesWiderBand(t *testing.T) {
 }
 
 // overflowingDecider rejects any request whose state matches tooLong, as Jev does past its context length.
-func overflowingDecider(tooLong func(state string) bool) *deciderMock {
-	inner := fixedDecider(map[string]float64{"0": 1}, 0.5)
+func overflowingDecider(tooLong func(state string) bool, mode string) *deciderMock {
+	inner := engagingDecider(map[string]float64{"0": 1}, 0.5, mode)
 	return &deciderMock{SystemOneFunc: func(ctx context.Context, req jev.Request) (jev.Response, error) {
 		if tooLong(req.State.(string)) {
 			return jev.Response{}, &jev.APIError{StatusCode: http.StatusBadRequest, Body: `{"error":"max_tokens_exceeded"}`}
@@ -119,7 +132,7 @@ func TestEstimateSendsWholeDocumentInOneRequest(t *testing.T) {
 
 func TestEstimateSplitsInHalfWhenContextExceeded(t *testing.T) {
 	t.Parallel()
-	mock := overflowingDecider(func(state string) bool { return len(strings.Fields(state)) > 100 })
+	mock := overflowingDecider(func(state string) bool { return len(strings.Fields(state)) > 100 }, engageSkim)
 	paragraph := strings.Repeat("word ", 60)
 	rep, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), strings.Repeat(paragraph+"\n\n", 4))
 	require.NoError(t, err)
@@ -130,7 +143,7 @@ func TestEstimateSplitsInHalfWhenContextExceeded(t *testing.T) {
 
 func TestEstimateFailsWhenTextCannotBeSplitSmallEnough(t *testing.T) {
 	t.Parallel()
-	mock := overflowingDecider(func(string) bool { return true })
+	mock := overflowingDecider(func(string) bool { return true }, engageSkim)
 	_, err := NewEstimator(mock, noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "too long")
 	assert.True(t, jev.IsContextExceeded(err))
 }
@@ -172,21 +185,47 @@ func guideFetcher() *linkFetcherMock {
 
 const linkedText = "See [the guide](guide.md) and [the spec](https://example.com/spec) first."
 
-func TestEstimateAddsLinkedContentWeightedByNeed(t *testing.T) {
-	t.Parallel()
-	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 10, testLogger())
-	rep, err := est.Estimate(t.Context(), linkedText)
+func estimateLinked(t *testing.T, mode string) (Report, *deciderMock) {
+	t.Helper()
+	mock := engagingDecider(map[string]float64{"0": 1}, 0.5, mode)
+	rep, err := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), linkedText)
 	require.NoError(t, err)
-	assert.Equal(t, time.Minute, crossfnResult(t, rep).Understand.Expected)
+	return rep, mock
 }
 
-func TestEstimateReportsNeedAndSkippedLinks(t *testing.T) {
+func TestEstimateSkimmedLinkAddsFractionOfReadTimeWithoutEvaluatingIt(t *testing.T) {
 	t.Parallel()
-	est := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 10, testLogger())
-	rep, err := est.Estimate(t.Context(), linkedText)
-	require.NoError(t, err)
+	rep, mock := estimateLinked(t, engageSkim)
+	assert.InDelta(t, 48, crossfnResult(t, rep).Understand.Expected.Seconds(), 1e-6)
+	assert.Len(t, mock.SystemOneCalls(), 1)
+}
+
+func TestEstimateStudiedLinkAddsItsUnderstandTime(t *testing.T) {
+	t.Parallel()
+	rep, mock := estimateLinked(t, engageStudy)
+	assert.Equal(t, 90*time.Second, crossfnResult(t, rep).Understand.Expected)
+	assert.Len(t, mock.SystemOneCalls(), 2)
+}
+
+func TestEstimateUnopenedLinkAddsNothing(t *testing.T) {
+	t.Parallel()
+	rep, _ := estimateLinked(t, engageSkip)
+	assert.Equal(t, 30*time.Second, crossfnResult(t, rep).Understand.Expected)
+}
+
+func TestEstimateReportsLinkRelationAndEngagement(t *testing.T) {
+	t.Parallel()
+	rep, _ := estimateLinked(t, engageSkim)
 	require.Len(t, rep.Links, 2)
-	assert.Equal(t, LinkResult{Text: "the guide", Target: "guide.md", Words: 238, Chunks: 1, NeededBy: map[string]float64{"esl": 0.5, "crossfn": 0.5, "junior": 0.5, "senior": 0.5, "expert": 0.5}}, rep.Links[0])
+	guide := rep.Links[0]
+	assert.Equal(t, [4]any{"source", engageSkim, 238, false}, [4]any{guide.Relation, guide.Engagement["crossfn"], guide.Words, guide.Evaluated})
+	assert.InDelta(t, 18, guide.Added["crossfn"].Expected.Seconds(), 1e-6)
+}
+
+func TestEstimateReportsSkippedLinks(t *testing.T) {
+	t.Parallel()
+	rep, _ := estimateLinked(t, engageSkim)
+	require.Len(t, rep.Links, 2)
 	assert.Equal(t, LinkResult{Text: "the spec", Target: "https://example.com/spec", External: true, Skipped: "external links disabled"}, rep.Links[1])
 }
 
@@ -194,12 +233,12 @@ func TestEstimateAsksLinkQuestionsOnlyInChunkContainingLink(t *testing.T) {
 	t.Parallel()
 	mock := overflowingDecider(func(state string) bool {
 		return strings.Contains(state, "one two") && strings.Contains(state, "[the guide]")
-	})
+	}, engageSkim)
 	_, err := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), "one two three four five\n\n"+linkedText)
 	require.NoError(t, err)
 	for _, call := range mock.SystemOneCalls() {
 		state := call.Req.State.(string)
-		_, asked := call.Req.Questions[linkQuestionID(0, Audiences()[0])]
+		_, asked := call.Req.Questions[linkRelationID(0)]
 		assert.Equal(t, strings.Contains(state, "[the guide]"), asked, state)
 	}
 }
@@ -292,10 +331,16 @@ func TestSplitChunks(t *testing.T) {
 	}
 }
 
-func TestEstimateCountsFollowedDocumentsAndAllChunks(t *testing.T) {
+func TestEstimateCountsStudiedLinksAndTheirChunks(t *testing.T) {
 	t.Parallel()
-	mock := overflowingDecider(func(state string) bool { return strings.Count(state, "word") > 200 })
+	mock := overflowingDecider(func(state string) bool { return strings.Count(state, "word") > 200 }, engageStudy)
 	rep, err := NewEstimator(mock, guideFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), linkedText)
 	require.NoError(t, err)
-	assert.Equal(t, [2]int{2, 3}, [2]int{rep.Documents, rep.Chunks})
+	assert.Equal(t, [3]int{2, 2, 3}, [3]int{rep.Documents, rep.Evaluated, rep.Chunks})
+}
+
+func TestEstimateCountsFetchedButUnevaluatedLinksAsDocuments(t *testing.T) {
+	t.Parallel()
+	rep, _ := estimateLinked(t, engageSkim)
+	assert.Equal(t, [3]int{2, 1, 1}, [3]int{rep.Documents, rep.Evaluated, rep.Chunks})
 }

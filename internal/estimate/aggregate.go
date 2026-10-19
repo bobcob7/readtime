@@ -18,10 +18,6 @@ func (r Range) plus(o Range) Range {
 	return Range{Expected: r.Expected + o.Expected, Low: r.Low + o.Low, High: r.High + o.High}
 }
 
-func (r Range) scale(f float64) Range {
-	return Range{Expected: time.Duration(float64(r.Expected) * f), Low: time.Duration(float64(r.Low) * f), High: time.Duration(float64(r.High) * f)}
-}
-
 // band holds expected, low and high values in minutes.
 type band struct {
 	expected, low, high float64
@@ -34,6 +30,14 @@ func (b band) add(o band) band {
 // atLeast raises each value to the floor's, e.g. so understanding never takes less than reading.
 func (b band) atLeast(floor band) band {
 	return band{expected: max(b.expected, floor.expected), low: max(b.low, floor.low), high: max(b.high, floor.high)}
+}
+
+func (b band) scale(f float64) band {
+	return band{expected: b.expected * f, low: b.low * f, high: b.high * f}
+}
+
+func flat(m float64) band {
+	return band{expected: m, low: m, high: m}
 }
 
 func (b band) toRange() Range {
@@ -84,7 +88,7 @@ func aggregate(aud Audience, evals []evaluation) (Result, error) {
 		}
 		read := float64(c.words) / aud.WordsPerMinute
 		readMinutes += read
-		u = u.atLeast(band{expected: read, low: read, high: read})
+		u = u.atLeast(flat(read))
 		understand = understand.add(u)
 		grok = grok.add(g.atLeast(u))
 		likelihood += feasible.Noul * float64(c.words)
@@ -97,6 +101,19 @@ func aggregate(aud Audience, evals []evaluation) (Result, error) {
 		Grok:           grok.toRange(),
 		GrokLikelihood: likelihood / float64(words),
 	}, nil
+}
+
+// understandBand sums an audience's understand time across evals, never below read time.
+func understandBand(aud Audience, evals []evaluation) (band, error) {
+	var total band
+	for i, ev := range evals {
+		u, err := answerBand(ev.resp, questionID(aud, kindUnderstand), understandLevels())
+		if err != nil {
+			return band{}, fmt.Errorf("chunk %d: %w", i+1, err)
+		}
+		total = total.add(u.atLeast(flat(float64(ev.chunk.words) / aud.WordsPerMinute)))
+	}
+	return total, nil
 }
 
 func answerBand(resp jev.Response, id string, levels []timeLevel) (band, error) {

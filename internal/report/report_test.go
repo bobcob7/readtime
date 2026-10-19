@@ -16,6 +16,7 @@ func sampleReport() estimate.Report {
 	return estimate.Report{
 		Words:     476,
 		Documents: 1,
+		Evaluated: 1,
 		Chunks:    1,
 		Model:     "jev-test",
 		Results: []estimate.Result{{
@@ -74,12 +75,12 @@ func TestTableListsFollowedAndSkippedLinks(t *testing.T) {
 	t.Parallel()
 	rep := sampleReport()
 	rep.Links = []estimate.LinkResult{
-		{Target: "docs/setup.md", Words: 300, NeededBy: map[string]float64{"adult": 0.75}},
+		{Target: "docs/setup.md", Words: 300, Relation: "prerequisite", Engagement: map[string]string{"adult": "skim"}, Added: map[string]estimate.Range{"adult": {Expected: 90 * time.Second}}},
 		{Target: "https://example.com", External: true, Skipped: "external links disabled (pass -external)"},
 	}
 	var buf bytes.Buffer
 	require.NoError(t, Table(&buf, rep))
-	assert.Contains(t, buf.String(), "docs/setup.md  300    75%")
+	assert.Contains(t, buf.String(), "docs/setup.md  prerequisite  300    +1m 30s skim")
 	assert.Contains(t, buf.String(), "skipped https://example.com: external links disabled (pass -external)")
 }
 
@@ -93,17 +94,17 @@ func TestTableOmitsLinkSectionWithoutLinks(t *testing.T) {
 func TestTableSummarisesDocumentsAndChunksProcessed(t *testing.T) {
 	t.Parallel()
 	rep := sampleReport()
-	rep.Documents, rep.Chunks = 3, 5
+	rep.Documents, rep.Evaluated, rep.Chunks = 3, 2, 5
 	var buf bytes.Buffer
 	require.NoError(t, Table(&buf, rep))
-	assert.Contains(t, buf.String(), "476 words; processed 3 documents in 5 chunks; model jev-test.")
+	assert.Contains(t, buf.String(), "476 words; processed 3 documents, 2 assessed by Jev in 5 chunks; model jev-test.")
 }
 
 func TestTableUsesSingularForOneDocumentAndChunk(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	require.NoError(t, Table(&buf, sampleReport()))
-	assert.Contains(t, buf.String(), "processed 1 document in 1 chunk;")
+	assert.Contains(t, buf.String(), "processed 1 document, 1 assessed by Jev in 1 chunk;")
 }
 
 func TestJSONIncludesDocumentAndChunkCounts(t *testing.T) {

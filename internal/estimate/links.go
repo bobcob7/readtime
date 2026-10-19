@@ -11,20 +11,28 @@ import (
 	"github.com/bobcob7/readtime/internal/links"
 )
 
-// linkedDoc is a link from the main text together with its own per-audience estimate.
+const (
+	// studyThreshold is the study probability above which a linked document is sent to Jev itself.
+	studyThreshold = 0.05
+	glanceMinutes  = 0.5
+	lookupMinutes  = 3
+	skimFraction   = 0.3
+)
+
+// linkedDoc is a link from the main text, its fetched content and, if anyone may study it, its understand times.
 type linkedDoc struct {
 	link    links.Link
-	words   int
-	chunks  int
-	results []Result
+	content chunk
 	skipped error
+	// study holds per-audience understand time in minutes, in Audiences order; nil when not evaluated.
+	study  []band
+	chunks int
 }
 
-// followLinks fetches and estimates every link in text. Fetch failures mark the link skipped;
-// Jev failures abort, since they would also break the main estimate.
-func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Audience) ([]linkedDoc, error) {
+// fetchLinks fetches every link in text; failures mark the link skipped rather than aborting.
+func (e *Estimator) fetchLinks(ctx context.Context, text string) []linkedDoc {
 	if e.maxLinks <= 0 {
-		return nil, nil
+		return nil
 	}
 	found := links.Extract(text)
 	if len(found) > e.maxLinks {
@@ -32,7 +40,7 @@ func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Au
 		found = found[:e.maxLinks]
 	}
 	docs := make([]linkedDoc, len(found))
-	g, ctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(e.concurrency)
 	for i, link := range found {
 		g.Go(func() error {
@@ -43,37 +51,71 @@ func (e *Estimator) followLinks(ctx context.Context, text string, audiences []Au
 				docs[i].skipped = err
 				return nil
 			}
-			doc := wholeText(content)
-			if doc.words == 0 {
+			docs[i].content = wholeText(content)
+			if docs[i].content.words == 0 {
 				docs[i].skipped = errEmptyInput
-				return nil
 			}
-			results, chunks, err := e.estimateLinked(ctx, doc, content, audiences)
-			if err != nil {
-				return fmt.Errorf("estimating link %s: %w", link.Target, err)
-			}
-			docs[i].words, docs[i].chunks, docs[i].results = doc.words, chunks, results
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-	return docs, nil
+	_ = g.Wait()
+	return docs
 }
 
-// estimateLinked estimates a linked document on its own, without following its links.
-// It also returns how many chunks the document was split into.
-func (e *Estimator) estimateLinked(ctx context.Context, doc chunk, text string, audiences []Audience) ([]Result, int, error) {
-	evals, err := e.evaluate(ctx, doc, questionsFor(audiences, nil, text))
-	if err != nil {
-		return nil, 0, err
+// studyLinks asks Jev how long linked documents take to understand, but only those some audience may study.
+func (e *Estimator) studyLinks(ctx context.Context, audiences []Audience, docs []linkedDoc, evals []evaluation) error {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(e.concurrency)
+	for i := range docs {
+		if docs[i].skipped != nil || !mayStudy(i, audiences, evals) {
+			continue
+		}
+		g.Go(func() error {
+			linked, err := e.evaluate(ctx, docs[i].content, func(chunk) map[string]jev.Question { return understandQuestions(audiences) })
+			if err != nil {
+				return fmt.Errorf("estimating link %s: %w", docs[i].link.Target, err)
+			}
+			study := make([]band, len(audiences))
+			for j, aud := range audiences {
+				if study[j], err = understandBand(aud, linked); err != nil {
+					return fmt.Errorf("estimating link %s: %w", docs[i].link.Target, err)
+				}
+			}
+			docs[i].study, docs[i].chunks = study, len(linked)
+			return nil
+		})
 	}
-	results, err := aggregateAll(audiences, evals)
-	return results, len(evals), err
+	return g.Wait()
 }
 
-// linkInChunk reports whether c mentions link, so Jev judges its necessity in context.
+func mayStudy(linkIndex int, audiences []Audience, evals []evaluation) bool {
+	for _, aud := range audiences {
+		if answer, ok := findAnswer(evals, linkEngagementID(linkIndex, aud)); ok && answer.Probabilities[engageStudy] >= studyThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+// engagementMinutes is the time a reader spends on a linked document of the given read time in each mode.
+func engagementMinutes(mode string, read float64, study band) band {
+	switch mode {
+	case engageGlance:
+		return flat(min(read, glanceMinutes))
+	case engageLookup:
+		return flat(min(read, lookupMinutes))
+	case engageSkim:
+		return flat(read * skimFraction)
+	case engageRead:
+		return flat(read)
+	case engageStudy:
+		return study.atLeast(flat(read))
+	default:
+		return band{}
+	}
+}
+
+// linkInChunk reports whether c mentions link, so Jev judges it in context.
 // Links that cannot be located anywhere are asked about in the opening chunk.
 func linkInChunk(link links.Link, c chunk, fullText string) bool {
 	needles := []string{"[" + link.Text + "]", link.Target}
@@ -96,7 +138,7 @@ func findAnswer(evals []evaluation, id string) (jev.Answer, bool) {
 	return jev.Answer{}, false
 }
 
-// applyLinks folds each linked document's times into results, weighted by how likely each audience needs it.
+// applyLinks adds each link's probability-weighted engagement time to every audience's understand and grok times.
 func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkResult, error) {
 	out := make([]LinkResult, 0, len(docs))
 	for i, doc := range docs {
@@ -106,16 +148,30 @@ func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkR
 			out = append(out, lr)
 			continue
 		}
-		lr.Words, lr.Chunks, lr.NeededBy = doc.words, doc.chunks, make(map[string]float64, len(results))
+		relation, ok := findAnswer(evals, linkRelationID(i))
+		if !ok {
+			return nil, fmt.Errorf("%s: %w", linkRelationID(i), errMissingAnswer)
+		}
+		lr.Words, lr.Relation, lr.Evaluated, lr.Chunks = doc.content.words, relation.Choice, doc.study != nil, doc.chunks
+		lr.Engagement, lr.Added = make(map[string]string, len(results)), make(map[string]Range, len(results))
 		for j := range results {
-			id := linkQuestionID(i, results[j].Audience)
-			answer, ok := findAnswer(evals, id)
+			aud := results[j].Audience
+			answer, ok := findAnswer(evals, linkEngagementID(i, aud))
 			if !ok {
-				return nil, fmt.Errorf("%s: %w", id, errMissingAnswer)
+				return nil, fmt.Errorf("%s: %w", linkEngagementID(i, aud), errMissingAnswer)
 			}
-			lr.NeededBy[results[j].Audience.ID] = answer.Noul
-			results[j].Understand = results[j].Understand.plus(doc.results[j].Understand.scale(answer.Noul))
-			results[j].Grok = results[j].Grok.plus(doc.results[j].Grok.scale(answer.Noul))
+			read := float64(doc.content.words) / aud.WordsPerMinute
+			study := flat(read)
+			if doc.study != nil {
+				study = doc.study[j]
+			}
+			var added band
+			for mode := range engagements() {
+				added = added.add(engagementMinutes(mode, read, study).scale(answer.Probabilities[mode]))
+			}
+			lr.Engagement[aud.ID], lr.Added[aud.ID] = answer.Choice, added.toRange()
+			results[j].Understand = results[j].Understand.plus(added.toRange())
+			results[j].Grok = results[j].Grok.plus(added.toRange())
 		}
 		out = append(out, lr)
 	}

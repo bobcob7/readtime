@@ -28,7 +28,7 @@ func Table(w io.Writer, r estimate.Report) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing table: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "\n%d words; processed %s in %s; model %s.\nRead uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, plural(r.Documents, "document"), plural(r.Chunks, "chunk"), r.Model); err != nil {
+	if _, err := fmt.Fprintf(w, "\n%d words; processed %s, %d assessed by Jev in %s; model %s.\nRead uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, plural(r.Documents, "document"), r.Evaluated, plural(r.Chunks, "chunk"), r.Model); err != nil {
 		return fmt.Errorf("writing summary: %w", err)
 	}
 	if len(r.Links) == 0 {
@@ -39,7 +39,7 @@ func Table(w io.Writer, r estimate.Report) error {
 
 func linkTable(w io.Writer, r estimate.Report) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprint(tw, "\nLINK\tWORDS")
+	fmt.Fprint(tw, "\nLINK\tRELATION\tWORDS")
 	for _, res := range r.Results {
 		fmt.Fprintf(tw, "\t%s", strings.ToUpper(res.Audience.ID))
 	}
@@ -50,9 +50,9 @@ func linkTable(w io.Writer, r estimate.Report) error {
 			skipped = append(skipped, link)
 			continue
 		}
-		fmt.Fprintf(tw, "%s\t%d", link.Target, link.Words)
+		fmt.Fprintf(tw, "%s\t%s\t%d", link.Target, link.Relation, link.Words)
 		for _, res := range r.Results {
-			fmt.Fprintf(tw, "\t%.0f%%", link.NeededBy[res.Audience.ID]*100)
+			fmt.Fprintf(tw, "\t+%s %s", formatDuration(link.Added[res.Audience.ID].Expected), link.Engagement[res.Audience.ID])
 		}
 		fmt.Fprintln(tw)
 	}
@@ -62,7 +62,7 @@ func linkTable(w io.Writer, r estimate.Report) error {
 	for _, link := range skipped {
 		fmt.Fprintf(w, "skipped %s: %s\n", link.Target, link.Skipped)
 	}
-	if _, err := fmt.Fprintln(w, "\nPercentages are the chance each audience must read the link; understand and grok times include linked content weighted by them."); err != nil {
+	if _, err := fmt.Fprintln(w, "\nEach cell is the expected time the link adds to understanding, and how that audience most likely uses it.\nUnderstand and grok times above include these."); err != nil {
 		return fmt.Errorf("writing link summary: %w", err)
 	}
 	return nil
@@ -84,19 +84,27 @@ type jsonResult struct {
 	GrokLikelihood float64   `json:"grok_likelihood"`
 }
 
+type jsonEngagement struct {
+	Engagement string    `json:"engagement"`
+	Added      jsonRange `json:"added"`
+}
+
 type jsonLink struct {
-	Text     string             `json:"text"`
-	Target   string             `json:"target"`
-	External bool               `json:"external"`
-	Words    int                `json:"words,omitempty"`
-	Chunks   int                `json:"chunks,omitempty"`
-	NeededBy map[string]float64 `json:"needed_by,omitempty"`
-	Skipped  string             `json:"skipped,omitempty"`
+	Text      string                    `json:"text"`
+	Target    string                    `json:"target"`
+	External  bool                      `json:"external"`
+	Words     int                       `json:"words,omitempty"`
+	Relation  string                    `json:"relation,omitempty"`
+	Evaluated bool                      `json:"evaluated"`
+	Chunks    int                       `json:"chunks,omitempty"`
+	Audiences map[string]jsonEngagement `json:"audiences,omitempty"`
+	Skipped   string                    `json:"skipped,omitempty"`
 }
 
 type jsonReport struct {
 	Words     int          `json:"words"`
 	Documents int          `json:"documents"`
+	Evaluated int          `json:"evaluated"`
 	Chunks    int          `json:"chunks"`
 	Model     string       `json:"model"`
 	Audiences []jsonResult `json:"audiences"`
@@ -105,9 +113,9 @@ type jsonReport struct {
 
 // JSON writes r to w as indented JSON with durations in seconds.
 func JSON(w io.Writer, r estimate.Report) error {
-	out := jsonReport{Words: r.Words, Documents: r.Documents, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results)), Links: make([]jsonLink, 0, len(r.Links))}
+	out := jsonReport{Words: r.Words, Documents: r.Documents, Evaluated: r.Evaluated, Chunks: r.Chunks, Model: r.Model, Audiences: make([]jsonResult, 0, len(r.Results)), Links: make([]jsonLink, 0, len(r.Links))}
 	for _, link := range r.Links {
-		out.Links = append(out.Links, jsonLink(link))
+		out.Links = append(out.Links, toJSONLink(link))
 	}
 	for _, res := range r.Results {
 		out.Audiences = append(out.Audiences, jsonResult{
@@ -126,6 +134,26 @@ func JSON(w io.Writer, r estimate.Report) error {
 		return fmt.Errorf("encoding json: %w", err)
 	}
 	return nil
+}
+
+func toJSONLink(link estimate.LinkResult) jsonLink {
+	out := jsonLink{
+		Text:      link.Text,
+		Target:    link.Target,
+		External:  link.External,
+		Words:     link.Words,
+		Relation:  link.Relation,
+		Evaluated: link.Evaluated,
+		Chunks:    link.Chunks,
+		Skipped:   link.Skipped,
+	}
+	if len(link.Added) > 0 {
+		out.Audiences = make(map[string]jsonEngagement, len(link.Added))
+		for id, added := range link.Added {
+			out.Audiences[id] = jsonEngagement{Engagement: link.Engagement[id], Added: toJSONRange(added)}
+		}
+	}
+	return out
 }
 
 func toJSONRange(r estimate.Range) jsonRange {

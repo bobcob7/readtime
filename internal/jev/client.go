@@ -37,6 +37,11 @@ func Score(instructions string, levels ...string) Question {
 	return Question{Type: "score", Instructions: instructions, Criteria: levels}
 }
 
+// Choice builds a question picking one of the labelled options; criteria maps label to description.
+func Choice(instructions string, criteria map[string]any) Question {
+	return Question{Type: "choice", Instructions: instructions, Criteria: criteria}
+}
+
 // Noul builds a yes/no question with descriptions of what each answer means.
 func Noul(instructions, ifTrue, ifFalse string) Question {
 	return Question{Type: "noul", Instructions: instructions, Criteria: map[string]string{"true": ifTrue, "false": ifFalse}}
