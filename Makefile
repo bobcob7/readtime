@@ -1,18 +1,13 @@
-GOBIN := $(CURDIR)/bin
+.PHONY: generate fmt test build
 
-.PHONY: tools generate fmt test build
+generate:
+	go generate ./...
 
-tools:
-	GOBIN=$(GOBIN) go install github.com/matryer/moq mvdan.cc/gofumpt
-
-generate: tools
-	PATH="$(GOBIN):$$PATH" go generate ./...
-
-fmt: tools
-	$(GOBIN)/gofumpt -w .
+fmt:
+	go tool gofumpt -w .
 
 test:
 	go test -race ./...
 
 build:
-	go build -o $(GOBIN)/readtime ./cmd/readtime
+	go build -o bin/readtime ./cmd/readtime
