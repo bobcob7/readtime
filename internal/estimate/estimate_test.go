@@ -364,3 +364,36 @@ func TestEstimateCapsLinksAtMaxLinks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, rep.Links, 1)
 }
+
+func TestEstimateSkimIsFractionOfReadTime(t *testing.T) {
+	t.Parallel()
+	rep, err := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), noFetcher(), "jev-latest", 10, testLogger()).Estimate(t.Context(), strings.Repeat("word ", 476))
+	require.NoError(t, err)
+	assert.InDelta(t, 36, crossfnResult(t, rep).Skim.Seconds(), 1e-6)
+}
+
+func TestEstimateCapsStudiedLinkAtReadAndSkimDepth(t *testing.T) {
+	t.Parallel()
+	rep, _ := estimateLinked(t, engageStudy)
+	res := crossfnResult(t, rep)
+	rootRead := 7.0 / 238 * 60
+	assert.InDelta(t, rootRead+60, res.Read.Seconds(), 1e-6)
+	assert.InDelta(t, rootRead*skimFraction+18, res.Skim.Seconds(), 1e-6)
+}
+
+func TestCapMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		mode, ceiling, want string
+	}{
+		{mode: engageStudy, ceiling: engageSkim, want: engageSkim},
+		{mode: engageGlance, ceiling: engageSkim, want: engageGlance},
+		{mode: engageRead, ceiling: engageRead, want: engageRead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode+"_under_"+tt.ceiling, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, capMode(tt.mode, tt.ceiling))
+		})
+	}
+}

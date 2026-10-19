@@ -9,6 +9,8 @@ import (
 )
 
 const (
+	// skimFraction is the share of read time spent skimming, roughly 3x reading speed.
+	skimFraction      = 0.3
 	lowQuantile       = 0.1
 	highQuantile      = 0.9
 	quantileTolerance = 1e-9
@@ -96,6 +98,7 @@ func aggregate(aud Audience, evals []evaluation) (Result, error) {
 	}
 	return Result{
 		Audience:       aud,
+		Skim:           minutes(readMinutes * skimFraction),
 		Read:           minutes(readMinutes),
 		Understand:     understand.toRange(),
 		Grok:           grok.toRange(),

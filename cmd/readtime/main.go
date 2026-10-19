@@ -44,7 +44,8 @@ func run(args []string) error {
 	jsonOut := fs.Bool("json", false, "emit JSON instead of a table")
 	model := fs.String("model", jev.DefaultModel, "Jev model to query")
 	timeout := fs.Duration("timeout", 2*time.Minute, "overall time limit")
-	verbose := fs.Bool("v", false, "log API activity to stderr")
+	verbose := fs.Bool("v", false, "show ranges, link breakdown and processing details")
+	debug := fs.Bool("debug", false, "log API activity to stderr")
 	baseDir := fs.String("base", ".", "directory relative links resolve against when reading stdin")
 	external := fs.Bool("external", false, "also fetch http(s) links")
 	maxLinks := fs.Int("max-links", -1, "maximum links to follow; 0 disables, negative follows all")
@@ -67,7 +68,7 @@ func run(args []string) error {
 		return err
 	}
 	level := slog.LevelWarn
-	if *verbose {
+	if *debug {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
@@ -82,10 +83,14 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("estimating: %w", err)
 	}
-	if *jsonOut {
+	switch {
+	case *jsonOut:
 		return report.JSON(os.Stdout, rep)
+	case *verbose:
+		return report.Detailed(os.Stdout, rep)
+	default:
+		return report.Summary(os.Stdout, rep)
 	}
-	return report.Table(os.Stdout, rep)
 }
 
 // readInput reads the file argument if given, else stdin, and returns the directory relative links resolve against.

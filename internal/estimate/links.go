@@ -3,6 +3,7 @@ package estimate
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
@@ -16,7 +17,6 @@ const (
 	studyThreshold = 0.05
 	glanceMinutes  = 0.5
 	lookupMinutes  = 3
-	skimFraction   = 0.3
 )
 
 // linkedDoc is a link from the main text, its fetched content and, if anyone may study it, its understand times.
@@ -115,6 +115,32 @@ func engagementMinutes(mode string, read float64, study band) band {
 	}
 }
 
+// engagementOrder lists modes from least to most effort.
+func engagementOrder() []string {
+	return []string{engageSkip, engageGlance, engageLookup, engageSkim, engageRead, engageStudy}
+}
+
+// capMode limits mode to ceiling, e.g. a reader skimming the text only skims a link they would otherwise study.
+func capMode(mode, ceiling string) string {
+	order := engagementOrder()
+	if slices.Index(order, mode) > slices.Index(order, ceiling) {
+		return ceiling
+	}
+	return mode
+}
+
+// linkTimes is the probability-weighted time a link adds when skimming, reading and understanding the text.
+func linkTimes(probs map[string]float64, read float64, study band) (band, band, band) {
+	var skim, readThrough, understand band
+	for _, mode := range engagementOrder() {
+		p := probs[mode]
+		skim = skim.add(engagementMinutes(capMode(mode, engageSkim), read, study).scale(p))
+		readThrough = readThrough.add(engagementMinutes(capMode(mode, engageRead), read, study).scale(p))
+		understand = understand.add(engagementMinutes(mode, read, study).scale(p))
+	}
+	return skim, readThrough, understand
+}
+
 // linkInChunk reports whether c mentions link, so Jev judges it in context.
 // Links that cannot be located anywhere are asked about in the opening chunk.
 func linkInChunk(link links.Link, c chunk, fullText string) bool {
@@ -138,7 +164,7 @@ func findAnswer(evals []evaluation, id string) (jev.Answer, bool) {
 	return jev.Answer{}, false
 }
 
-// applyLinks adds each link's probability-weighted engagement time to every audience's understand and grok times.
+// applyLinks adds each link's probability-weighted engagement time to every audience's times.
 func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkResult, error) {
 	out := make([]LinkResult, 0, len(docs))
 	for i, doc := range docs {
@@ -165,11 +191,10 @@ func applyLinks(results []Result, docs []linkedDoc, evals []evaluation) ([]LinkR
 			if doc.study != nil {
 				study = doc.study[j]
 			}
-			var added band
-			for mode := range engagements() {
-				added = added.add(engagementMinutes(mode, read, study).scale(answer.Probabilities[mode]))
-			}
+			skim, readThrough, added := linkTimes(answer.Probabilities, read, study)
 			lr.Engagement[aud.ID], lr.Added[aud.ID] = answer.Choice, added.toRange()
+			results[j].Skim += minutes(skim.expected)
+			results[j].Read += minutes(readThrough.expected)
 			results[j].Understand = results[j].Understand.plus(added.toRange())
 			results[j].Grok = results[j].Grok.plus(added.toRange())
 		}

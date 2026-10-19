@@ -1,4 +1,4 @@
-// Package report renders estimates as a terminal table or JSON.
+// Package report renders estimates as a summary table, a detailed breakdown or JSON.
 package report
 
 import (
@@ -16,19 +16,51 @@ import (
 
 const workDay = 8 * time.Hour
 
-// Table writes a human-readable table of r to w.
-func Table(w io.Writer, r estimate.Report) error {
+// Summary writes expected skim, read, understand and grok times per audience, links included.
+func Summary(w io.Writer, r estimate.Report) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "AUDIENCE\tWPM\tREAD\tUNDERSTAND\tGROK\tCAN GROK")
+	fmt.Fprintln(tw, "AUDIENCE\tSKIM\tREAD\tUNDERSTAND\tGROK")
 	for _, res := range r.Results {
-		fmt.Fprintf(tw, "%s\t%.0f\t%s\t%s\t%s\t%.0f%%\n",
-			res.Audience.Name, res.Audience.WordsPerMinute, formatDuration(res.Read),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", res.Audience.Name, formatDuration(res.Skim), formatDuration(res.Read),
+			formatDuration(res.Understand.Expected), formatDuration(res.Grok.Expected))
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("writing table: %w", err)
+	}
+	followed, skipped := 0, 0
+	for _, link := range r.Links {
+		if link.Skipped != "" {
+			skipped++
+			continue
+		}
+		followed++
+	}
+	if followed == 0 && skipped == 0 {
+		return nil
+	}
+	note := fmt.Sprintf("\nIncludes time spent on %s.", plural(followed, "linked document"))
+	if skipped > 0 {
+		note += fmt.Sprintf(" Skipped %s (-v for details).", plural(skipped, "link"))
+	}
+	if _, err := fmt.Fprintln(w, note); err != nil {
+		return fmt.Errorf("writing summary: %w", err)
+	}
+	return nil
+}
+
+// Detailed writes ranges, reading speeds, processing counts and a per-link breakdown.
+func Detailed(w io.Writer, r estimate.Report) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "AUDIENCE\tWPM\tSKIM\tREAD\tUNDERSTAND\tGROK\tCAN GROK")
+	for _, res := range r.Results {
+		fmt.Fprintf(tw, "%s\t%.0f\t%s\t%s\t%s\t%s\t%.0f%%\n",
+			res.Audience.Name, res.Audience.WordsPerMinute, formatDuration(res.Skim), formatDuration(res.Read),
 			formatRange(res.Understand), formatRange(res.Grok), res.GrokLikelihood*100)
 	}
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing table: %w", err)
 	}
-	if _, err := fmt.Fprintf(w, "\n%d words; processed %s, %d assessed by Jev in %s; model %s.\nRead uses words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, plural(r.Documents, "document"), r.Evaluated, plural(r.Chunks, "chunk"), r.Model); err != nil {
+	if _, err := fmt.Fprintf(w, "\n%d words; processed %s, %d assessed by Jev in %s; model %s.\nSkim and read use words per minute; understand and grok are Jev's\nestimates of cumulative focused working time (d = 8h day). Ranges are 10th-90th percentile.\n", r.Words, plural(r.Documents, "document"), r.Evaluated, plural(r.Chunks, "chunk"), r.Model); err != nil {
 		return fmt.Errorf("writing summary: %w", err)
 	}
 	if len(r.Links) == 0 {
@@ -62,7 +94,7 @@ func linkTable(w io.Writer, r estimate.Report) error {
 	for _, link := range skipped {
 		fmt.Fprintf(w, "skipped %s: %s\n", link.Target, link.Skipped)
 	}
-	if _, err := fmt.Fprintln(w, "\nEach cell is the expected time the link adds to understanding, and how that audience most likely uses it.\nUnderstand and grok times above include these."); err != nil {
+	if _, err := fmt.Fprintln(w, "\nEach cell is the expected time the link adds to understanding, and how that audience most likely uses it.\nAll times above include link time; skim and read cap each link at that depth."); err != nil {
 		return fmt.Errorf("writing link summary: %w", err)
 	}
 	return nil
@@ -78,6 +110,7 @@ type jsonResult struct {
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
 	WordsPerMinute float64   `json:"words_per_minute"`
+	SkimSeconds    float64   `json:"skim_seconds"`
 	ReadSeconds    float64   `json:"read_seconds"`
 	Understand     jsonRange `json:"understand"`
 	Grok           jsonRange `json:"grok"`
@@ -122,6 +155,7 @@ func JSON(w io.Writer, r estimate.Report) error {
 			ID:             res.Audience.ID,
 			Name:           res.Audience.Name,
 			WordsPerMinute: res.Audience.WordsPerMinute,
+			SkimSeconds:    seconds(res.Skim),
 			ReadSeconds:    seconds(res.Read),
 			Understand:     toJSONRange(res.Understand),
 			Grok:           toJSONRange(res.Grok),
