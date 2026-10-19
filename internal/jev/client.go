@@ -37,6 +37,11 @@ func Score(instructions string, levels ...string) Question {
 	return Question{Type: "score", Instructions: instructions, Criteria: levels}
 }
 
+// Choice builds a question picking one of the labelled options; criteria maps label to description.
+func Choice(instructions string, criteria map[string]any) Question {
+	return Question{Type: "choice", Instructions: instructions, Criteria: criteria}
+}
+
 // Noul builds a yes/no question with descriptions of what each answer means.
 func Noul(instructions, ifTrue, ifFalse string) Question {
 	return Question{Type: "noul", Instructions: instructions, Criteria: map[string]string{"true": ifTrue, "false": ifFalse}}
@@ -80,6 +85,12 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("system one returned %d: %s", e.StatusCode, e.Body)
+}
+
+// IsContextExceeded reports whether err means the request was longer than the model's context length.
+func IsContextExceeded(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest && strings.Contains(apiErr.Body, "max_tokens_exceeded")
 }
 
 func (e *APIError) retryable() bool {
