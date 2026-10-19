@@ -80,7 +80,8 @@ type Estimator struct {
 	logger      *slog.Logger
 }
 
-// NewEstimator returns an Estimator that queries model and follows up to maxLinks links (0 disables).
+// NewEstimator returns an Estimator that queries model and follows up to maxLinks links
+// (0 disables links, negative follows all).
 func NewEstimator(d decider, f linkFetcher, model string, maxLinks int, logger *slog.Logger) *Estimator {
 	return &Estimator{
 		decider:     d,

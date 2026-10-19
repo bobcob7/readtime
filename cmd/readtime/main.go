@@ -47,7 +47,7 @@ func run(args []string) error {
 	verbose := fs.Bool("v", false, "log API activity to stderr")
 	baseDir := fs.String("base", ".", "directory relative links resolve against when reading stdin")
 	external := fs.Bool("external", false, "also fetch http(s) links")
-	maxLinks := fs.Int("max-links", 10, "maximum links to follow (0 disables)")
+	maxLinks := fs.Int("max-links", -1, "maximum links to follow; 0 disables, negative follows all")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: readtime [flags] [file]\n       <text> | readtime [flags]\n\nEstimates read, understand and grok times per professional audience using TypeSafe Jev.\nLinked content is followed one level deep. Requires TYPESAFE_API_KEY.\n\nFlags:")
 		fs.PrintDefaults()

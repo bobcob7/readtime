@@ -31,11 +31,11 @@ type linkedDoc struct {
 
 // fetchLinks fetches every link in text; failures mark the link skipped rather than aborting.
 func (e *Estimator) fetchLinks(ctx context.Context, text string) []linkedDoc {
-	if e.maxLinks <= 0 {
+	if e.maxLinks == 0 {
 		return nil
 	}
 	found := links.Extract(text)
-	if len(found) > e.maxLinks {
+	if e.maxLinks > 0 && len(found) > e.maxLinks {
 		e.logger.WarnContext(ctx, "too many links; following only the first ones", "found", len(found), "max", e.maxLinks)
 		found = found[:e.maxLinks]
 	}

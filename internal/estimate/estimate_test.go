@@ -3,6 +3,7 @@ package estimate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -343,4 +344,23 @@ func TestEstimateCountsFetchedButUnevaluatedLinksAsDocuments(t *testing.T) {
 	t.Parallel()
 	rep, _ := estimateLinked(t, engageSkim)
 	assert.Equal(t, [3]int{2, 1, 1}, [3]int{rep.Documents, rep.Evaluated, rep.Chunks})
+}
+
+func TestEstimateWithNegativeMaxLinksFollowsAll(t *testing.T) {
+	t.Parallel()
+	var text strings.Builder
+	for i := range 25 {
+		fmt.Fprintf(&text, "[doc %d](doc%d.md) ", i, i)
+	}
+	fetcher := guideFetcher()
+	rep, err := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), fetcher, "jev-latest", -1, testLogger()).Estimate(t.Context(), text.String())
+	require.NoError(t, err)
+	assert.Len(t, rep.Links, 25)
+}
+
+func TestEstimateCapsLinksAtMaxLinks(t *testing.T) {
+	t.Parallel()
+	rep, err := NewEstimator(fixedDecider(map[string]float64{"0": 1}, 0.5), guideFetcher(), "jev-latest", 1, testLogger()).Estimate(t.Context(), linkedText)
+	require.NoError(t, err)
+	assert.Len(t, rep.Links, 1)
 }
